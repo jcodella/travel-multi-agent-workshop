@@ -5,7 +5,7 @@ import uuid
 import asyncio
 import json
 from typing import Literal
-from datetime import datetime
+from datetime import datetime, UTC
 
 # Add the project root to Python path to enable imports
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -20,14 +20,16 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.graph import StateGraph, START, MessagesState
 from langgraph.prebuilt import create_react_agent
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from langsmith import traceable
+from langgraph_checkpoint_cosmosdb import CosmosDBSaver
 
 from src.app.services.azure_open_ai import model
 from src.app.services.azure_cosmos_db import (
     DATABASE_NAME, checkpoint_container,
     sessions_container, patch_active_agent,
-    update_session_container, append_message
+    update_session_container, append_message,
+    count_active_messages
 )
 
 # Setup logging - reduce clutter by setting specific loggers to WARNING
@@ -63,6 +65,37 @@ def load_prompt(agent_name: str) -> str:
 def filter_tools_by_prefix(tools, prefixes):
     """Filter tools by name prefix"""
     return [tool for tool in tools if any(tool.name.startswith(prefix) for prefix in prefixes)]
+
+
+def format_conflict_message(conflicts: list) -> str:
+    """
+    Format conflict information for user confirmation.
+    
+    Args:
+        conflicts: List of conflict dictionaries with preference, conflict, and strategy
+        
+    Returns:
+        Formatted message string asking user to clarify
+    """
+    if not conflicts:
+        return ""
+    
+    msg = "I noticed something about your preferences that I'd like to clarify:\n\n"
+    
+    for i, conflict in enumerate(conflicts, 1):
+        pref = conflict.get("preference", {})
+        existing = conflict.get("conflict", "")
+        strategy = conflict.get("strategy", "")
+        
+        msg += f"{i}. You previously mentioned: \"{existing}\"\n"
+        msg += f"   But now you said: \"{pref.get('text', '')}\"\n"
+        if strategy:
+            msg += f"   ({strategy})\n"
+        msg += "\n"
+    
+    msg += "Have your preferences changed, or is this specific to a particular trip? Let me know so I can update your profile correctly!"
+    
+    return msg
 
 
 # Global variables for MCP session management
@@ -165,49 +198,39 @@ async def setup_agents():
     # Tool Distribution for Specialized Agents
     # ========================================================================
     
-    # Orchestrator: Session management + all transfer tools
+    # Orchestrator: Session management + memory tools + all transfer tools
     orchestrator_tools = filter_tools_by_prefix(all_tools, [
         "create_session", "get_session_context", "append_turn",
+        "extract_preferences_from_message", "resolve_memory_conflicts", "store_resolved_preferences",
         "transfer_to_"  # All transfer tools
     ])
-    
-    # Hotel Agent: Place discovery + memory (hotel preferences)
+
     hotel_tools = filter_tools_by_prefix(all_tools, [
         "discover_places",  # Search hotels
-        "store_user_memory", "recall_memories",  # Store hotel preferences
+        "recall_memories",
         "transfer_to_orchestrator", "transfer_to_itinerary_generator"
     ])
-    
-    # Activity Agent: Place discovery + memory (activity preferences)
+
     activity_tools = filter_tools_by_prefix(all_tools, [
         "discover_places",  # Search attractions
-        "store_user_memory", "recall_memories",  # Store activity preferences
+        "recall_memories",
         "transfer_to_orchestrator", "transfer_to_itinerary_generator"
     ])
-    
-    # Dining Agent: Place discovery + memory (dining preferences)
+
     dining_tools = filter_tools_by_prefix(all_tools, [
         "discover_places",  # Search restaurants
-        "store_user_memory", "recall_memories",  # Store dining preferences
+        "recall_memories",
         "transfer_to_orchestrator", "transfer_to_itinerary_generator"
     ])
-    
-    # Itinerary Generator: Trip management + conversation context + place discovery
-    # Handles TWO flows:
-    # 1. WARM START: User already discussed hotels/restaurants → use get_session_context to extract them
-    # 2. COLD START: User directly requests itinerary → use discover_places to search
+
     itinerary_generator_tools = filter_tools_by_prefix(all_tools, [
-        "create_new_trip", "update_trip", "get_trip_details",  # Trip CRUD
-        "recall_memories",  # User preferences (dietary, budget, style)
-        "get_session_context",  # Read conversation to extract recommended places (WARM START)
-        "discover_places",  # Search for new places if no prior recommendations (COLD START)
+        "create_new_trip", "update_trip", "get_trip_details",
         "transfer_to_orchestrator"
     ])
-    
-    # Summarizer: Summarization tools only
+
     summarizer_tools = filter_tools_by_prefix(all_tools, [
         "get_summarizable_span", "mark_span_summarized", "get_session_context",
-        "recall_memories",  # Extract important info before summarizing
+        "get_all_user_summaries",  # Query all summaries for the user
         "transfer_to_orchestrator"
     ])
     
@@ -275,27 +298,6 @@ async def cleanup_persistent_session():
 # Helper: Store Message in Database at Every Turn
 # ============================================================================
 
-def store_message_in_db(
-    session_id: str, 
-    tenant_id: str, 
-    user_id: str, 
-    role: str, 
-    content: str
-):
-    """Store every message (user + assistant) in messages container"""
-    try:
-        append_message(
-            session_id=session_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            role=role,
-            content=content
-        )
-        logger.debug(f"💾 Stored {role} message in DB")
-    except Exception as e:
-        logger.error(f"Failed to store message in DB: {e}")
-
-
 # ============================================================================
 # Agent Node Functions
 # ============================================================================
@@ -313,12 +315,6 @@ async def call_orchestrator_agent(state: MessagesState, config) -> Command[Liter
     
     logger.info(f"🎯 Calling orchestrator agent with Thread: {thread_id}, User: {user_id}, Tenant: {tenant_id}")
     
-    # Store user message in database
-    if state["messages"]:
-        last_message = state["messages"][-1]
-        if hasattr(last_message, 'content'):
-            store_message_in_db(thread_id, tenant_id, user_id, "user", last_message.content)
-    
     # Add context about available parameters
     state["messages"].append(SystemMessage(
         content=f"If tool to be called requires tenantId='{tenant_id}', userId='{user_id}', session_id='{thread_id}', include these in the JSON parameters when invoking the tool. Do not ask the user for them."
@@ -328,8 +324,8 @@ async def call_orchestrator_agent(state: MessagesState, config) -> Command[Liter
     try:
         logging.info(f"Looking up active agent for thread {thread_id}")
         session_doc = sessions_container.read_item(
-            item=threadId,
-            partition_key=[tenant_id, user_id, threadId]
+            item=thread_id,
+            partition_key=[tenant_id, user_id, thread_id]
         )
         activeAgent = session_doc.get('activeAgent', 'unknown')
     except Exception as e:
@@ -344,8 +340,8 @@ async def call_orchestrator_agent(state: MessagesState, config) -> Command[Liter
             "tenantId": tenant_id,
             "userId": user_id,
             "title": "New Conversation",
-            "createdAt": datetime.utcnow().isoformat() + "Z",
-            "lastActivityAt": datetime.utcnow().isoformat() + "Z",
+            "createdAt": datetime.now(UTC).isoformat(),
+            "lastActivityAt": datetime.now(UTC).isoformat(),
             "status": "active",
             "messageCount": 0
         })
@@ -355,13 +351,6 @@ async def call_orchestrator_agent(state: MessagesState, config) -> Command[Liter
     # Always call orchestrator to analyze the message and decide routing
     # Don't blindly route to the last active agent - user's request may have changed
     response = await orchestrator_agent.ainvoke(state, config)
-    
-    # Store only the FINAL assistant response in database (not all intermediate reasoning steps)
-    if isinstance(response, dict) and "messages" in response:
-        ai_messages = [msg for msg in response["messages"] if isinstance(msg, AIMessage) and msg.content]
-        if ai_messages:
-            # Store only the last AI message (the final user-facing response)
-            store_message_in_db(thread_id, tenant_id, user_id, "assistant", ai_messages[-1].content)
     
     return Command(update=response, goto="human")
 
@@ -403,8 +392,6 @@ async def call_hotel_agent(state: MessagesState, config) -> Command[Literal["hot
         ai_messages = [msg for msg in response["messages"] if isinstance(msg, AIMessage) and msg.content]
         if ai_messages:
             logger.info(f"💬 Hotel Agent response: {ai_messages[-1].content[:200]}...")
-            # Store only the last AI message (the final user-facing response)
-            store_message_in_db(thread_id, tenant_id, user_id, "assistant", ai_messages[-1].content)
         
         # Remove system message
         response["messages"] = [
@@ -438,14 +425,8 @@ async def call_activity_agent(state: MessagesState, config) -> Command[Literal["
     
     response = await activity_agent.ainvoke(state, config)
     
-    # Store only the FINAL assistant response in database (not all intermediate reasoning steps)
+    # Remove system message
     if isinstance(response, dict) and "messages" in response:
-        ai_messages = [msg for msg in response["messages"] if isinstance(msg, AIMessage) and msg.content]
-        if ai_messages:
-            # Store only the last AI message (the final user-facing response)
-            store_message_in_db(thread_id, tenant_id, user_id, "assistant", ai_messages[-1].content)
-        
-        # Remove system message
         response["messages"] = [
             msg for msg in response["messages"]
             if not isinstance(msg, SystemMessage)
@@ -476,14 +457,8 @@ async def call_dining_agent(state: MessagesState, config) -> Command[Literal["di
     
     response = await dining_agent.ainvoke(state, config)
     
-    # Store only the FINAL assistant response in database (not all intermediate reasoning steps)
+    # Remove system message
     if isinstance(response, dict) and "messages" in response:
-        ai_messages = [msg for msg in response["messages"] if isinstance(msg, AIMessage) and msg.content]
-        if ai_messages:
-            # Store only the last AI message (the final user-facing response)
-            store_message_in_db(thread_id, tenant_id, user_id, "assistant", ai_messages[-1].content)
-        
-        # Remove system message
         response["messages"] = [
             msg for msg in response["messages"]
             if not isinstance(msg, SystemMessage)
@@ -514,14 +489,8 @@ async def call_itinerary_generator_agent(state: MessagesState, config) -> Comman
     
     response = await itinerary_generator_agent.ainvoke(state, config)
     
-    # Store only the FINAL assistant response in database (not all intermediate reasoning steps)
+    # Remove system message
     if isinstance(response, dict) and "messages" in response:
-        ai_messages = [msg for msg in response["messages"] if isinstance(msg, AIMessage) and msg.content]
-        if ai_messages:
-            # Store only the last AI message (the final user-facing response)
-            store_message_in_db(thread_id, tenant_id, user_id, "assistant", ai_messages[-1].content)
-        
-        # Remove system message
         response["messages"] = [
             msg for msg in response["messages"]
             if not isinstance(msg, SystemMessage)
@@ -553,14 +522,8 @@ async def call_summarizer_agent(state: MessagesState, config) -> Command[Literal
     
     response = await summarizer_agent.ainvoke(state, config)
     
-    # Store only the FINAL assistant response in database (not all intermediate reasoning steps)
+    # Remove system message
     if isinstance(response, dict) and "messages" in response:
-        ai_messages = [msg for msg in response["messages"] if isinstance(msg, AIMessage) and msg.content]
-        if ai_messages:
-            # Store only the last AI message (the final user-facing response)
-            store_message_in_db(thread_id, tenant_id, user_id, "assistant", ai_messages[-1].content)
-        
-        # Remove system message
         response["messages"] = [
             msg for msg in response["messages"]
             if not isinstance(msg, SystemMessage)
@@ -574,7 +537,6 @@ def human_node(state: MessagesState, config) -> None:
     """
     Human node: Interrupts for user input in interactive mode.
     """
-    from langgraph.types import interrupt
     interrupt(value="Ready for user input.")
     return None
 
@@ -594,39 +556,17 @@ def should_summarize(state: MessagesState, config) -> bool:
     # If we have 10+ messages, check if we need summarization
     if message_count >= 10:
         try:
-            # Get actual message count from DB for more accuracy
-            from src.app.services.azure_cosmos_db import messages_container
-            if messages_container:
-                # Query all non-superseded message IDs (more efficient than COUNT)
-                query = """
-                SELECT c.id
-                FROM c 
-                WHERE c.sessionId = @sessionId 
-                AND c.tenantId = @tenantId 
-                AND c.userId = @userId
-                AND (NOT IS_DEFINED(c.superseded) OR c.superseded = false)
-                """
-                
-                params = [
-                    {"name": "@sessionId", "value": thread_id},
-                    {"name": "@tenantId", "value": tenant_id}, 
-                    {"name": "@userId", "value": user_id}
-                ]
-                
-                results = list(messages_container.query_items(
-                    query=query, 
-                    parameters=params,
-                    enable_cross_partition_query=True
-                ))
-                
-                # Count results in Python (avoids Cosmos DB COUNT issues)
-                actual_count = len(results)
-                logger.info(f"📊 Message count check: {actual_count} messages")
-                
-                # Trigger summarization every 10 messages
-                if actual_count >= 10 and actual_count % 10 == 0:
-                    logger.info(f"🎯 Auto-triggering summarization at {actual_count} messages")
-                    return True
+            # Get actual count from DB (non-superseded, non-summary messages only)
+            actual_count = count_active_messages(
+                session_id=thread_id,
+                tenant_id=tenant_id,
+                user_id=user_id
+            )
+            
+            # Trigger summarization every 10 messages
+            if actual_count >= 10 and actual_count % 10 == 0:
+                logger.info(f"🎯 Auto-triggering summarization at {actual_count} messages")
+                return True
                         
         except Exception as e:
             logger.error(f"Error checking message count for summarization: {e}")
@@ -785,7 +725,6 @@ def build_agent_graph():
     )
     
     # Compile with checkpointer
-    from langgraph_checkpoint_cosmosdb import CosmosDBSaver
     checkpointer = CosmosDBSaver(
         database_name=DATABASE_NAME,
         container_name=checkpoint_container

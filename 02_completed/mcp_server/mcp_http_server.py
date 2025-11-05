@@ -1,21 +1,27 @@
 import sys
 import os
 import logging
+import json
 from typing import Any, Dict, List, Optional
 from langsmith import traceable
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-from src.app.services.azure_open_ai import generate_embedding
+from src.app.services.azure_open_ai import generate_embedding, get_openai_client
 from src.app.services.azure_cosmos_db import (
     create_session_record,
-    get_session_by_id,
+    get_all_user_memories, get_session_by_id,
     append_message,
+    get_message_by_id,
     get_session_messages,
     get_session_summaries,
+    get_user_summaries,
     create_summary,
     store_memory,
     query_memories,
-    query_places,
+    update_memory_last_used,
+    supersede_memory,
+    query_places_hybrid,
     create_trip,
     get_trip,
     record_api_event,
@@ -25,10 +31,18 @@ from src.app.services.azure_cosmos_db import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress SSE, OpenAI, urllib3, and LangSmith debug logs
+logging.getLogger("sse_starlette.sse").setLevel(logging.WARNING)
+logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+logging.getLogger("langsmith.client").setLevel(logging.WARNING)
+
+# Prompt directory
+PROMPT_DIR = os.path.join(os.path.dirname(__file__), '..', 'python', 'src', 'app', 'prompts')
+
 # Load environment variables
 try:
-    from dotenv import load_dotenv
-    load_dotenv('.env.oauth', override=False)
+    load_dotenv('.env', override=False)
     
     # Load authentication configuration
     simple_token = os.getenv("MCP_AUTH_TOKEN")
@@ -213,7 +227,7 @@ def store_user_memory(
 ) -> Dict[str, Any]:
     """
     Store a user memory with appropriate TTL and indexing.
-    
+
     Args:
         user_id: User identifier
         tenant_id: Tenant identifier
@@ -223,16 +237,16 @@ def store_user_memory(
         salience: Importance score (0.0-1.0)
         justification: Source message ID or reasoning
         generate_embedding_flag: Whether to generate embedding (default: True)
-        
+
     Returns:
         Dictionary with memoryId and metadata
     """
     logger.info(f"🧠 Storing {memory_type} memory for user: {user_id}")
-    
+
     # Validate memory type
     if memory_type not in ["declarative", "episodic", "procedural"]:
         raise ValueError(f"Invalid memory type: {memory_type}")
-    
+
     # Generate embedding if requested
     embedding = None
     if generate_embedding_flag and text:
@@ -240,7 +254,7 @@ def store_user_memory(
             embedding = generate_embedding(text)
         except Exception as e:
             logger.warning(f"Failed to generate embedding: {e}")
-    
+
     memory_id = store_memory(
         user_id=user_id,
         tenant_id=tenant_id,
@@ -251,7 +265,7 @@ def store_user_memory(
         justification=justification,
         embedding=embedding
     )
-    
+
     return {
         "memoryId": memory_id,
         "type": memory_type,
@@ -265,8 +279,7 @@ def store_user_memory(
 def recall_memories(
     user_id: str,
     tenant_id: str,
-    query: Optional[str] = None,
-    memory_types: Optional[List[str]] = None,
+    query: str,
     min_salience: float = 0.0
 ) -> List[Dict[str, Any]]:
     """
@@ -275,21 +288,18 @@ def recall_memories(
     Args:
         user_id: User identifier
         tenant_id: Tenant identifier
-        query: Optional search query
-        memory_types: Optional filter by memory types
+        query: Search query for semantic search
         min_salience: Minimum salience threshold (default: 0.0)
         
     Returns:
         List of memory dictionaries with scores and match reasons
     """
     logger.info(f"🔍 Recalling memories for user: {user_id}")
-    
-    # TODO: Implement hybrid search with vector similarity
     # For now, return top memories by salience
     memories = query_memories(
         user_id=user_id,
         tenant_id=tenant_id,
-        memory_types=memory_types,
+        query=query,
         min_salience=min_salience
     )
     
@@ -328,6 +338,23 @@ def mark_span_summarized(
     """
     logger.info(f"📝 Creating summary for session: {session_id}")
     
+    # Get the last message being summarized to extract its timestamp
+    to_message_id = span.get("toMessageId")
+    last_message = get_message_by_id(
+        message_id=to_message_id,
+        session_id=session_id,
+        tenant_id=tenant_id,
+        user_id=user_id
+    )
+    
+    # Extract timestamp or fallback to current time
+    if last_message and last_message.get("ts"):
+        last_message_ts = last_message.get("ts")
+    else:
+        from datetime import datetime
+        last_message_ts = datetime.utcnow().isoformat() + "Z"
+        logger.warning(f"Could not find timestamp for message {to_message_id}, using current time")
+    
     # Generate embedding if requested
     embedding = None
     if generate_embedding_flag and summary_text:
@@ -342,6 +369,7 @@ def mark_span_summarized(
         user_id=user_id,
         summary_text=summary_text,
         span=span,
+        summary_timestamp=last_message_ts,
         embedding=embedding,
         supersedes=supersedes
     )
@@ -349,7 +377,8 @@ def mark_span_summarized(
     return {
         "summaryId": summary_id,
         "supersededCount": len(supersedes),
-        "embeddingGenerated": embedding is not None
+        "embeddingGenerated": embedding is not None,
+        "summaryTimestamp": last_message_ts
     }
 
 
@@ -359,7 +388,7 @@ def get_summarizable_span(
     session_id: str,
     tenant_id: str,
     user_id: str,
-    min_messages: int = 20,
+    min_messages: int = 10,
     retention_window: int = 10
 ) -> Dict[str, Any]:
     """
@@ -369,7 +398,7 @@ def get_summarizable_span(
         session_id: Session identifier
         tenant_id: Tenant identifier
         user_id: User identifier
-        min_messages: Minimum messages needed for summarization (default: 20)
+        min_messages: Minimum messages needed for summarization (default: 10)
         retention_window: Number of recent messages to keep (default: 10)
         
     Returns:
@@ -416,6 +445,367 @@ def get_summarizable_span(
     }
 
 
+@mcp.tool()
+@traceable
+def get_all_user_summaries(
+    user_id: str,
+    tenant_id: str
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve all conversation summaries for a user across all sessions.
+    Useful when user asks "Show me my past trips" or "What have we discussed before?".
+    
+    Args:
+        user_id: User identifier
+        tenant_id: Tenant identifier
+        
+    Returns:
+        List of summary objects containing sessionId, text, and createdAt
+
+    """
+    logger.info(f"📚 Retrieving all summaries for user: {user_id}")
+    
+    summaries = get_user_summaries(
+        user_id=user_id,
+        tenant_id=tenant_id
+    )
+    
+    # Return simplified format for agent consumption
+    return [
+        {
+            "summaryId": s.get("summaryId"),
+            "sessionId": s.get("sessionId"),
+            "text": s.get("text"),
+            "createdAt": s.get("createdAt"),
+            "span": s.get("span")
+        }
+        for s in summaries
+    ]
+
+
+# ============================================================================
+# 3.5 LLM-Based Memory Extraction & Conflict Resolution
+# ============================================================================
+
+def load_prompty_template(filename: str) -> str:
+    """Load prompty file content (strips frontmatter, returns system+user sections)"""
+    file_path = os.path.join(PROMPT_DIR, filename)
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            # Remove frontmatter (--- ... ---) if present
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    content = parts[2].strip()
+            return content
+    except FileNotFoundError:
+        logger.error(f"Prompty file not found: {file_path}")
+        raise
+
+
+def call_llm_with_prompt(template: str, variables: Dict[str, Any], temperature: float = 0.3) -> str:
+    """
+    Call Azure OpenAI with a prompt template and variables.
+
+    Args:
+        template: Prompt template with {{variable}} placeholders
+        variables: Dictionary of variable values to substitute
+        temperature: LLM temperature (default 0.3 for structured output)
+
+    Returns:
+        LLM response content as string (with markdown code blocks stripped if present)
+    """
+    client = get_openai_client()
+
+    # Substitute variables in template
+    prompt = template
+    for key, value in variables.items():
+        prompt = prompt.replace(f"{{{{{key}}}}}", str(value))
+
+    response = client.chat.completions.create(
+        model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=2000
+    )
+
+    content = response.choices[0].message.content
+
+    # Strip markdown code blocks if present (```json ... ``` or ``` ... ```)
+    if content.startswith("```"):
+        # Remove opening ```json or ```
+        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        # Remove closing ```
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+    return content
+
+
+@mcp.tool()
+@traceable
+def extract_preferences_from_message(
+    message: str,
+    role: str,
+    user_id: str,
+    tenant_id: str
+) -> Dict[str, Any]:
+    """
+    Extract travel preferences from a user or assistant message using LLM.
+    Smart enough to skip greetings, simple yes/no, and other non-preference messages.
+    
+    Args:
+        message: The message text to analyze
+        role: Message role (user/assistant)
+        user_id: User identifier (for logging)
+        tenant_id: Tenant identifier (for logging)
+        
+    Returns:
+        Dictionary with:
+        - shouldExtract: bool (whether to extract)
+        - skipReason: str (reason if skipped)
+        - preferences: list of extracted preferences with category, value, text, salience, type
+    """
+    logger.info(f"🔍 Extracting preferences from {role} message for user {user_id}")
+    
+    try:
+        # Load prompty template
+        template = load_prompty_template("preference_extraction.prompty")
+        
+        # Call LLM
+        response_text = call_llm_with_prompt(
+            template=template,
+            variables={"message": message, "role": role},
+            temperature=0.3
+        )
+        
+        # Parse JSON response
+        response_json = json.loads(response_text)
+        
+        logger.info(f"✅ Extraction complete: shouldExtract={response_json.get('shouldExtract', False)}")
+        return response_json
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse LLM response as JSON: {e}")
+        return {
+            "shouldExtract": False,
+            "skipReason": "LLM response parsing error",
+            "preferences": []
+        }
+    except Exception as e:
+        logger.error(f"Error extracting preferences: {e}")
+        return {
+            "shouldExtract": False,
+            "skipReason": f"Error: {str(e)}",
+            "preferences": []
+        }
+
+
+@mcp.tool()
+@traceable
+def resolve_memory_conflicts(
+    new_preferences: List[Dict[str, Any]],
+    user_id: str,
+    tenant_id: str
+) -> Dict[str, Any]:
+    """
+    Resolve conflicts between new preferences and existing memories using LLM.
+    
+    Args:
+        new_preferences: List of new preferences to check
+        user_id: User identifier
+        tenant_id: Tenant identifier
+        
+    Returns:
+        Dictionary with:
+        - resolutions: list of resolution decisions for each preference
+          - conflict: bool
+          - conflictsWith: str (existing memory text)
+          - conflictingMemoryId: str
+          - severity: none/low/high
+          - decision: auto-resolve/require-confirmation
+          - strategy: explanation
+          - action: store-new/update-existing/store-both/ask-user
+    """
+    logger.info(f"⚖️  Resolving conflicts for {len(new_preferences)} preferences")
+    
+    try:
+        # Query existing memories
+        existing_memories = get_all_user_memories(
+            user_id=user_id,
+            tenant_id=tenant_id
+        )
+        
+        # Format existing memories for LLM
+        existing_prefs_text = "\n".join([
+            f"- [{mem.get('type')}] {mem.get('text')} (salience: {mem.get('salience')}, id: {mem.get('memoryId')})"
+            for mem in existing_memories
+        ])
+        
+        # Format new preferences for LLM
+        new_prefs_text = json.dumps(new_preferences, indent=2)
+        
+        # Load prompty template
+        template = load_prompty_template("memory_conflict_resolution.prompty")
+        
+        # Call LLM
+        response_text = call_llm_with_prompt(
+            template=template,
+            variables={
+                "existing_preferences": existing_prefs_text,
+                "new_preferences": new_prefs_text
+            },
+            temperature=0.3
+        )
+        
+        # Parse JSON response
+        response_json = json.loads(response_text)
+        
+        # Count severity levels
+        high_severity_count = sum(1 for r in response_json.get("resolutions", []) if r.get("severity") == "high")
+        low_severity_count = sum(1 for r in response_json.get("resolutions", []) if r.get("severity") == "low")
+        
+        logger.info(f"✅ Conflict resolution complete: {high_severity_count} high, {low_severity_count} low severity")
+        
+        return response_json
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse LLM response as JSON: {e}")
+        return {"resolutions": []}
+    except Exception as e:
+        logger.error(f"Error resolving conflicts: {e}")
+        return {"resolutions": []}
+
+
+@mcp.tool()
+@traceable
+def store_resolved_preferences(
+    resolutions: List[Dict[str, Any]],
+    user_id: str,
+    tenant_id: str,
+    justification: str
+) -> Dict[str, Any]:
+    """
+    Store preferences that have been auto-resolved (no user confirmation needed).
+    Skip preferences that require user confirmation.
+    
+    Args:
+        resolutions: List of resolution decisions from resolve_memory_conflicts
+        user_id: User identifier
+        tenant_id: Tenant identifier
+        justification: Source message ID or reasoning
+        
+    Returns:
+        Dictionary with:
+        - stored: list of stored memory IDs
+        - needsConfirmation: list of preferences requiring user confirmation
+        - superseded: list of old memory IDs that were marked as superseded
+    """
+    logger.info(f"💾 Storing resolved preferences for user {user_id}")
+    
+    stored = []
+    needs_confirmation = []
+    superseded = []
+    
+    try:
+        for resolution in resolutions:
+            decision = resolution.get("decision")
+            action = resolution.get("action")
+            new_pref = resolution.get("newPreference", {})
+            
+            if decision == "require-confirmation":
+                # Skip and add to confirmation list
+                needs_confirmation.append({
+                    "preference": new_pref,
+                    "conflict": resolution.get("conflictsWith"),
+                    "strategy": resolution.get("strategy")
+                })
+                logger.info(f"⏸️  Skipping preference (needs confirmation): {new_pref.get('text')}")
+                continue
+            
+            # Auto-resolve actions
+            if action == "store-new":
+                # Store new preference
+                memory_id = store_memory(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    memory_type=new_pref.get("type", "declarative"),
+                    text=new_pref.get("text"),
+                    facets={new_pref.get("category"): {"value": new_pref.get("value")}},
+                    salience=new_pref.get("salience", 0.7),
+                    justification=justification,
+                    embedding=generate_embedding(new_pref.get("text")) if new_pref.get("text") else None
+                )
+                stored.append(memory_id)
+                logger.info(f"✅ Stored new preference: {memory_id}")
+                
+            elif action == "update-existing":
+                # Mark old as superseded and store new
+                old_memory_id = resolution.get("conflictingMemoryId")
+                
+                # Store new preference first
+                memory_id = store_memory(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    memory_type=new_pref.get("type", "declarative"),
+                    text=new_pref.get("text"),
+                    facets={new_pref.get("category"): {"value": new_pref.get("value")}},
+                    salience=new_pref.get("salience", 0.7),
+                    justification=justification,
+                    embedding=generate_embedding(new_pref.get("text")) if new_pref.get("text") else None
+                )
+                stored.append(memory_id)
+                logger.info(f"✅ Stored updated preference: {memory_id}")
+
+                # Now supersede the old memory
+                if old_memory_id:
+                    success = supersede_memory(
+                        memory_id=old_memory_id,
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                        superseded_by=memory_id
+                    )
+                    if success:
+                        superseded.append(old_memory_id)
+                        logger.info(f"🔄 Superseded old memory: {old_memory_id} with {memory_id}")
+                    else:
+                        logger.warning(f"⚠️ Failed to supersede old memory: {old_memory_id}")
+
+            elif action == "store-both":
+                # Store new preference (old one remains)
+                memory_id = store_memory(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    memory_type=new_pref.get("type", "declarative"),
+                    text=new_pref.get("text"),
+                    facets={new_pref.get("category"): {"value": new_pref.get("value")}},
+                    salience=new_pref.get("salience", 0.7),
+                    justification=justification,
+                    embedding=generate_embedding(new_pref.get("text")) if new_pref.get("text") else None
+                )
+                stored.append(memory_id)
+                logger.info(f"✅ Stored complementary preference: {memory_id}")
+
+        return {
+            "stored": stored,
+            "needsConfirmation": needs_confirmation,
+            "superseded": superseded,
+            "storedCount": len(stored),
+            "confirmationCount": len(needs_confirmation)
+        }
+
+    except Exception as e:
+        logger.error(f"Error storing preferences: {e}")
+        return {
+            "stored": stored,
+            "needsConfirmation": needs_confirmation,
+            "superseded": superseded,
+            "error": str(e)
+        }
+
+
 # ============================================================================
 # 4. Place Discovery Tools
 # ============================================================================
@@ -423,21 +813,25 @@ def get_summarizable_span(
 @mcp.tool()
 @traceable
 def discover_places(
-    geo_scope: str,
-    query: str,
-    user_id: str,
-    tenant_id: str = "",
-    filters: Optional[Dict[str, Any]] = None,
+        geo_scope: str,
+        query: str,
+        user_id: str,
+        tenant_id: str = "",
+        filters: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Memory-aware place search with hybrid retrieval.
+    Memory-aware place search with hybrid RRF retrieval (for chat assistant).
     
     Args:
         geo_scope: Geographic scope (e.g., "barcelona")
-        query: Search query
+        query: Natural language search query
         user_id: User identifier (for memory alignment)
         tenant_id: Tenant identifier
-        filters: Optional filters (type, dietary, priceTier, etc.)
+        filters: Optional filters dict with:
+            - type: "hotel" | "restaurant" | "attraction" (optional)
+            - dietary: ["vegan", "seafood"] (optional)
+            - accessibility: ["wheelchair-friendly"] (optional)
+            - priceTier: "budget" | "moderate" | "luxury" (optional)
         
     Returns:
         List of places with match reasons and memory alignment scores
@@ -449,99 +843,75 @@ def discover_places(
     logger.info(f"     - user_id: {user_id}")
     logger.info(f"     - tenant_id: {tenant_id}")
     logger.info(f"     - filters: {filters}")
-    
+
+    # Parse filters
+    filters = filters or {}
+    place_type = filters.get("type")
+    dietary = filters.get("dietary", [])
+    accessibility = filters.get("accessibility", [])
+    price_tier = filters.get("priceTier")
+
+    # Convert single values to lists if needed
+    if dietary and not isinstance(dietary, list):
+        dietary = [dietary]
+    if accessibility and not isinstance(accessibility, list):
+        accessibility = [accessibility]
+
+    logger.info(f"🔍 Parsed filters: type={place_type}, dietary={dietary}, access={accessibility}, price={price_tier}")
+
+    # Query places using hybrid RRF search
+    try:
+        places = query_places_hybrid(
+            query=query,
+            geo_scope_id=geo_scope,
+            place_type=place_type,
+            dietary=dietary,
+            accessibility=accessibility,
+            price_tier=price_tier,
+            limit=10
+        )
+        logger.info(f"✅ Hybrid RRF returned {len(places)} results")
+    except Exception as e:
+        logger.error(f"❌ Error in hybrid search: {e}")
+        import traceback
+        logger.error(f"{traceback.format_exc()}")
+        return []
+
     # Get user memories for alignment
     logger.info(f"🧠 Recalling user memories...")
     memories = recall_memories(
         user_id=user_id,
         tenant_id=tenant_id,
-        query=query,
-        memory_types=["declarative", "episodic"]
+        query=query
     )
     logger.info(f"🧠 Found {len(memories)} memories")
-    
-    # Parse filters - convert list to string if needed (defensive programming)
-    place_type = filters.get("type") if filters else None
-    if isinstance(place_type, list):
-        if place_type:
-            logger.warning(f"⚠️  place_type passed as list {place_type}, using first element")
-            place_type = place_type[0]
-        else:
-            place_type = None
-    # Handle pipe-separated types (e.g. "restaurant|cafe") - take first one
-    if place_type and "|" in place_type:
-        types = place_type.split("|")
-        logger.warning(f"⚠️  place_type contains pipe-separated values {types}, using first: '{types[0]}'")
-        place_type = types[0]
-    
-    dietary = filters.get("dietary") if filters else None
-    if isinstance(dietary, list):
-        if dietary:
-            logger.warning(f"⚠️  dietary passed as list {dietary}, using first element")
-            dietary = dietary[0]
-        else:
-            dietary = None
-    
-    price_tier = filters.get("priceTier") if filters else None
-    
-    logger.info(f"🔍 Parsed filters:")
-    logger.info(f"     - place_type: {place_type}")
-    logger.info(f"     - dietary: {dietary}")
-    logger.info(f"     - price_tier: {price_tier}")
 
-    logger.info(f"🔢 Generating embedding for query...")
-    try:
-        vectors = generate_embedding(query)
-        logger.info(f"✅ Embedding generated successfully (dimension: {len(vectors)})")
-    except Exception as e:
-        logger.error(f"❌ Failed to generate embedding: {e}")
-        raise
-    
-    # Query places
-    logger.info(f"🔍 Calling query_places from Cosmos DB...")
-    try:
-        places = query_places(
-            vectors=vectors,
-            geo_scope_id=geo_scope,
-            place_type=place_type,
-            dietary=dietary,
-            price_tier=price_tier,
-        )
-        logger.info(f"✅ query_places returned {len(places)} results")
-        if places:
-            logger.info(f"📍 Sample place: {places[0].get('name', 'N/A')} (type: {places[0].get('type', 'N/A')})")
-        else:
-            logger.warning(f"⚠️  No places returned from query_places!")
-    except Exception as e:
-        logger.error(f"❌ Error in query_places: {e}")
-        logger.error(f"❌ Exception type: {type(e).__name__}")
-        import traceback
-        logger.error(f"❌ Traceback: {traceback.format_exc()}")
-        raise
-    
     # Memory alignment scoring and match reason generation
-    logger.info(f"🎯 Starting memory alignment scoring...")
-    for idx, place in enumerate(places):
+    used_memory_ids = set()  # Track which memories were actually used
+
+    for place in places:
         alignment_score = 0.0
         match_reasons = []
-        
-        # Base reason: Vector similarity to query
-        if place.get("similarityScore"):
-            match_reasons.append(f"Semantic match (score: {place['similarityScore']:.2f})")
-        
+
+        # Base reason: Hybrid RRF match
+        match_reasons.append("Hybrid search match (text + semantic)")
+
         # Check alignment with user memories
         if memories:
             for memory in memories:
                 memory_facets = memory.get("facets", {})
-                
+                memory_id = memory.get("id")
+                memory_used = False
+
                 # Dietary alignment
                 if "dietary" in memory_facets:
                     memory_dietary = memory_facets["dietary"]
-                    place_dietary = place.get("restaurantSpecific", {}).get("dietaryOptions", [])
+                    place_dietary = place.get("dietary", [])
                     if memory_dietary in place_dietary:
                         alignment_score += 0.3
                         match_reasons.append(f"Matches your {memory_dietary} preference")
-                
+                        memory_used = True
+
                 # Price tier alignment
                 if "priceTier" in memory_facets:
                     memory_price = memory_facets["priceTier"]
@@ -549,16 +919,8 @@ def discover_places(
                     if memory_price == place_price:
                         alignment_score += 0.2
                         match_reasons.append(f"Matches your {place_price} preference")
-                
-                # Ambiance/style alignment
-                if "style" in memory_facets:
-                    memory_style = memory_facets["style"]
-                    place_amenities = place.get("hotelSpecific", {}).get("amenities", [])
-                    place_categories = place.get("activitySpecific", {}).get("categories", [])
-                    if memory_style in place_amenities or memory_style in place_categories:
-                        alignment_score += 0.2
-                        match_reasons.append(f"Matches your preference for {memory_style}")
-                
+                        memory_used = True
+
                 # Accessibility alignment
                 if "accessibility" in memory_facets:
                     memory_access = memory_facets["accessibility"]
@@ -566,31 +928,27 @@ def discover_places(
                     if memory_access in place_access:
                         alignment_score += 0.3
                         match_reasons.append(f"Accessible: {memory_access}")
-        
-        # Location/geo match
-        if geo_scope.lower() in place.get("geoScope", "").lower():
-            match_reasons.append(f"Located in {geo_scope}")
-        
-        # If no specific reasons found, add generic reason
-        if not match_reasons:
-            match_reasons.append("Location match")
-        
-        # Cap alignment score at 1.0
+                        memory_used = True
+
+                # Track this memory as used if it influenced the recommendation
+                if memory_used and memory_id:
+                    used_memory_ids.add(memory_id)
+
+        # Add memory alignment to place
         place["memoryAlignment"] = min(alignment_score, 1.0)
         place["matchReasons"] = match_reasons
-        
-        if idx == 0:  # Log first place details
-            logger.info(f"📍 Place {idx+1}: {place.get('name')} - alignment: {place['memoryAlignment']:.2f}, reasons: {match_reasons}")
-    
-    # Sort by combined score (similarity + memory alignment)
-    logger.info(f"📊 Sorting places by combined score...")
-    places.sort(
-        key=lambda p: (p.get("similarityScore", 0.0) * 0.6) + (p.get("memoryAlignment", 0.0) * 0.4),
-        reverse=True
-    )
-    
-    logger.info(f"✅ discover_places returning {len(places)} places")
-    logger.info(f"🗺️  ========== DISCOVER_PLACES TOOL COMPLETED ==========")
+
+    # Update lastUsedAt only for memories that were actually used
+    if used_memory_ids:
+        logger.info(f"🔄 Updating lastUsedAt for {len(used_memory_ids)} memories that influenced recommendations")
+        for memory_id in used_memory_ids:
+            update_memory_last_used(
+                memory_id=memory_id,
+                user_id=user_id,
+                tenant_id=tenant_id
+            )
+
+    logger.info(f"✅ Returning {len(places)} places with memory alignment")
     return places
 
 
@@ -601,14 +959,14 @@ def discover_places(
 @mcp.tool()
 @traceable
 def create_new_trip(
-    user_id: str,
-    tenant_id: str,
-    scope: Dict[str, str],
-    dates: Dict[str, str],
-    travelers: List[str],
-    constraints: Optional[Dict[str, Any]] = None,
-    days: Optional[List[Dict[str, Any]]] = None,
-    trip_duration: Optional[int] = None
+        user_id: str,
+        tenant_id: str,
+        scope: Dict[str, str],
+        dates: Dict[str, str],
+        travelers: List[str],
+        constraints: Optional[Dict[str, Any]] = None,
+        days: Optional[List[Dict[str, Any]]] = None,
+        trip_duration: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Create a new trip itinerary.
@@ -627,7 +985,7 @@ def create_new_trip(
         Dictionary with tripId and details
     """
     logger.info(f"🎒 Creating trip for user: {user_id} with {len(days or [])} days")
-    
+
     trip_id = create_trip(
         user_id=user_id,
         tenant_id=tenant_id,
@@ -638,7 +996,7 @@ def create_new_trip(
         days=days or [],
         trip_duration=trip_duration
     )
-    
+
     return {
         "tripId": trip_id,
         "scope": scope,
@@ -651,9 +1009,9 @@ def create_new_trip(
 @mcp.tool()
 @traceable
 def get_trip_details(
-    trip_id: str,
-    user_id: str,
-    tenant_id: str = ""
+        trip_id: str,
+        user_id: str,
+        tenant_id: str = ""
 ) -> Optional[Dict[str, Any]]:
     """
     Get trip details by ID.
@@ -673,10 +1031,10 @@ def get_trip_details(
 @mcp.tool()
 @traceable
 def update_trip(
-    trip_id: str,
-    user_id: str,
-    tenant_id: str,
-    updates: Dict[str, Any]
+        trip_id: str,
+        user_id: str,
+        tenant_id: str,
+        updates: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
     Update trip details (add days, modify constraints, etc.).
@@ -691,20 +1049,20 @@ def update_trip(
         Updated trip dictionary
     """
     logger.info(f"📝 Updating trip: {trip_id}")
-    
+
     # Get existing trip
     trip = get_trip(trip_id, user_id, tenant_id)
     if not trip:
         raise ValueError(f"Trip {trip_id} not found")
-    
+
     # Apply updates
     trip.update(updates)
-    
+
     # Save to Cosmos DB
     from src.app.services.azure_cosmos_db import trips_container
     if trips_container:
         trips_container.upsert_item(trip)
-    
+
     return trip
 
 
@@ -715,11 +1073,11 @@ def update_trip(
 @mcp.tool()
 @traceable
 def search_user_threads(
-    user_id: str,
-    tenant_id: str,
-    query: str,
-    mode: str = "hybrid",
-    since: Optional[str] = None
+        user_id: str,
+        tenant_id: str,
+        query: str,
+        mode: str = "hybrid",
+        since: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Hybrid search across user's conversation history.
@@ -735,12 +1093,12 @@ def search_user_threads(
         List of matches grouped by thread with scores
     """
     logger.info(f"🔍 Searching user threads for: {query}")
-    
+
     from src.app.services.azure_cosmos_db import messages_container
-    
+
     if not messages_container:
         return []
-    
+
     # Generate query embedding for semantic search
     query_embedding = None
     if mode in ["hybrid", "semantic"]:
@@ -748,7 +1106,7 @@ def search_user_threads(
             query_embedding = generate_embedding(query)
         except Exception as e:
             logger.warning(f"Failed to generate query embedding: {e}")
-    
+
     # Search messages (simplified - full implementation would use vector search)
     query_filter = """
     SELECT TOP 10 c.threadId, c.messageId, c.content, c.ts, c.role
@@ -878,7 +1236,7 @@ def transfer_to_hotel(
     Returns:
         JSON with goto field for routing
     """
-    import json
+    
     logger.info(f"🔄 Transfer to Hotel Agent: {reason}")
     
     return json.dumps({
@@ -912,7 +1270,7 @@ def transfer_to_activity(
     Returns:
         JSON with goto field for routing
     """
-    import json
+    
     logger.info(f"🔄 Transfer to Activity Agent: {reason}")
     
     return json.dumps({
@@ -946,7 +1304,7 @@ def transfer_to_dining(
     Returns:
         JSON with goto field for routing
     """
-    import json
+    
     logger.info(f"🔄 Transfer to Dining Agent: {reason}")
     
     return json.dumps({
@@ -980,7 +1338,7 @@ def transfer_to_itinerary_generator(
     Returns:
         JSON with goto field for routing
     """
-    import json
+    
     logger.info(f"🔄 Transfer to Itinerary Generator: {reason}")
     
     return json.dumps({
@@ -1014,7 +1372,7 @@ def transfer_to_summarizer(
     Returns:
         JSON with goto field for routing
     """
-    import json
+    
     logger.info(f"🔄 Transfer to Summarizer: {reason}")
     
     return json.dumps({
@@ -1048,7 +1406,7 @@ def transfer_to_orchestrator(
     Returns:
         JSON with goto field for routing
     """
-    import json
+    
     logger.info(f"🔄 Transfer to Orchestrator: {reason}")
     
     return json.dumps({
