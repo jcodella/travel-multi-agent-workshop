@@ -80,10 +80,10 @@ module openAi './shared/openai.bicep' = {
 //Deploy OpenAI Deployments
 var deployments = [
   {
-    name: 'gpt-4.1-mini'
+    name: 'gpt-4.1'
     skuCapacity: 30
 	skuName: 'GlobalStandard'
-    modelName: 'gpt-4.1-mini'
+    modelName: 'gpt-4.1'
     modelVersion: '2025-04-14'
   }
   {

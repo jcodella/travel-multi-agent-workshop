@@ -5073,6 +5073,8 @@ Message: "{{message}}"
 
 ```
 
+</details>
+
 ## Let's Review
 
 Congratulations! You've successfully implemented intelligent memory patterns for your travel assistant. Let's recap what you've built:
