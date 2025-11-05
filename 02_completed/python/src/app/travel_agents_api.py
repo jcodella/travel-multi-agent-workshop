@@ -14,13 +14,9 @@ from typing import List, Dict, Optional, Any
 from enum import Enum
 from starlette.middleware.cors import CORSMiddleware
 from azure.cosmos.exceptions import CosmosHttpResponseError
+import traceback
 
 import logging
-
-# logging.basicConfig(
-#     level=logging.DEBUG,  # Change to DEBUG for more details
-#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-# )
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -39,19 +35,13 @@ else:
     print(f"⚠️  .env file not found at: {env_file}, trying default locations")
     load_dotenv(override=False)
 
-# # Verify critical environment variables
-# mcp_token = os.getenv("MCP_AUTH_TOKEN")
-# mcp_url = os.getenv("MCP_SERVER_BASE_URL", "http://localhost:8080")
-# print(f"🔐 MCP_AUTH_TOKEN: {'SET (' + mcp_token[:8] + '...)' if mcp_token else 'NOT SET'}")
-# print(f"🌐 MCP_SERVER_BASE_URL: {mcp_url}")
-
 from src.app.services.azure_open_ai import model, generate_embedding
 from src.app.services.azure_cosmos_db import (
     sessions_container, messages_container, trips_container,
     memories_container, places_container, debug_logs_container, get_checkpoint_saver,
     create_session_record, get_session_by_id,
-    append_message, get_session_messages,
-    get_trip, query_memories, query_places,
+    append_message, get_session_messages, query_places_hybrid,
+    get_trip, query_memories, query_places_with_theme, query_places_filtered,
     patch_active_agent, update_session_activity,
     create_user, get_all_users, get_user_by_id,
     store_debug_log, get_debug_log, query_debug_logs
@@ -195,6 +185,7 @@ class PlaceSearchRequest(BaseModel):
 
 class PlaceFilterRequest(BaseModel):
     city: str
+    theme: Optional[str] = None  # NEW: Theme for semantic search
     types: Optional[List[str]] = None
     priceTiers: Optional[List[str]] = None
     dietary: Optional[List[str]] = None
@@ -295,6 +286,28 @@ async def initialize_agents():
             return
         except Exception as e:
             logger.error(f"❌ Failed to initialize agents (attempt {attempt + 1}/{max_retries}): {e}")
+            logger.error(f"❌ Exception type: {type(e).__name__}")
+            logger.error(f"❌ Full traceback:")
+            logger.error(traceback.format_exc())
+            
+            # If it's a TaskGroup exception, try to extract sub-exceptions
+            if hasattr(e, '__cause__'):
+                logger.error(f"❌ Underlying cause: {e.__cause__}")
+            if hasattr(e, '__context__'):
+                logger.error(f"❌ Exception context: {e.__context__}")
+            
+            # ExceptionGroup (Python 3.11+) stores sub-exceptions in .exceptions attribute
+            if hasattr(e, 'exceptions'):
+                logger.error(f"❌ TaskGroup contained {len(e.exceptions)} sub-exception(s):")
+                for idx, sub_exc in enumerate(e.exceptions, 1):
+                    logger.error(f"\n   --- Sub-exception #{idx} ---")
+                    logger.error(f"   Type: {type(sub_exc).__name__}")
+                    logger.error(f"   Message: {sub_exc}")
+                    logger.error(f"   Traceback:")
+                    sub_tb = ''.join(traceback.format_exception(type(sub_exc), sub_exc, sub_exc.__traceback__))
+                    for line in sub_tb.split('\n'):
+                        logger.error(f"   {line}")
+            
             if attempt < max_retries - 1:
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 await asyncio.sleep(retry_delay)
@@ -728,8 +741,8 @@ def extract_relevant_messages(
     tenantId: str,
     userId: str,
     sessionId: str
-) -> List[MessageModel]:
-    """Extract user and assistant messages from response data"""
+) -> List[tuple]:
+    """Extract user and assistant messages from response data. Returns tuples of (MessageModel, original_message)"""
     
     # Find the last agent node that responded
     last_agent_node = None
@@ -795,45 +808,64 @@ def extract_relevant_messages(
     if last_assistant_msg:
         filtered_messages.append(last_assistant_msg)
     
-    # Convert to MessageModel
+    # Convert to MessageModel and keep original message
     mapped_agent = agent_mapping.get(last_agent_name, last_agent_name.title())
     
-    return [
-        MessageModel(
-            id=str(uuid.uuid4()),
-            type="message",
-            sessionId=sessionId,
-            tenantId=tenantId,
-            userId=userId,
-            timeStamp=msg.response_metadata.get("timestamp", datetime.utcnow().isoformat()) if hasattr(msg, "response_metadata") else datetime.utcnow().isoformat(),
-            sender="User" if isinstance(msg, HumanMessage) else mapped_agent,
-            senderRole="User" if isinstance(msg, HumanMessage) else "Assistant",
-            text=msg.content if hasattr(msg, "content") else str(msg),
-            debugLogId=debug_log_id,
-            tokensUsed=msg.response_metadata.get("token_usage", {}).get("total_tokens", 0) if hasattr(msg, "response_metadata") else 0,
-            rating=None
-        )
-        for msg in filtered_messages
-        if (hasattr(msg, "content") and msg.content) or str(msg)
-    ]
+    result = []
+    for msg in filtered_messages:
+        if (hasattr(msg, "content") and msg.content) or str(msg):
+            message_model = MessageModel(
+                id=str(uuid.uuid4()),
+                type="message",
+                sessionId=sessionId,
+                tenantId=tenantId,
+                userId=userId,
+                timeStamp=msg.response_metadata.get("timestamp", datetime.utcnow().isoformat()) if hasattr(msg, "response_metadata") else datetime.utcnow().isoformat(),
+                sender="User" if isinstance(msg, HumanMessage) else mapped_agent,
+                senderRole="User" if isinstance(msg, HumanMessage) else "Assistant",
+                text=msg.content if hasattr(msg, "content") else str(msg),
+                debugLogId=debug_log_id,
+                tokensUsed=msg.response_metadata.get("token_usage", {}).get("total_tokens", 0) if hasattr(msg, "response_metadata") else 0,
+                rating=None
+            )
+            result.append((message_model, msg))
+    
+    return result
 
 
-def process_messages_background(messages: List[MessageModel], userId: str, tenantId: str, sessionId: str):
-    """Background task to store messages in Cosmos DB"""
+def process_messages_background(message_tuples: List[tuple], userId: str, tenantId: str, sessionId: str):
+    """
+    Background task to store messages in Cosmos DB.
+    
+    Args:
+        message_tuples: List of tuples containing (MessageModel, original_langchain_message)
+        userId: User identifier
+        tenantId: Tenant identifier
+        sessionId: Session identifier
+    """
     try:
-        for message in messages:
+        for message_model, original_msg in message_tuples:
+            # Extract tool_calls from original AIMessage if it exists
+            tool_calls = None
+            if isinstance(original_msg, AIMessage):
+                if hasattr(original_msg, 'tool_calls') and original_msg.tool_calls:
+                    tool_calls = original_msg.tool_calls
+                elif hasattr(original_msg, 'additional_kwargs') and "tool_calls" in original_msg.additional_kwargs:
+                    tool_calls = original_msg.additional_kwargs["tool_calls"]
+            
             append_message(
                 session_id=sessionId,
                 tenant_id=tenantId,
                 user_id=userId,
-                role="user" if message.senderRole == "User" else "assistant",
-                content=message.text
+                role="user" if message_model.senderRole == "User" else "assistant",
+                content=message_model.text,
+                tool_calls=tool_calls
             )
         
         # Update session activity
         update_session_activity(sessionId, tenantId, userId)
         
-        logger.info(f"✅ Stored {len(messages)} messages for session {sessionId}")
+        logger.info(f"✅ Stored {len(message_tuples)} messages for session {sessionId}")
     except Exception as e:
         logger.error(f"Error storing messages: {e}")
 
@@ -924,23 +956,32 @@ async def get_chat_completion(
             tenantId, userId, sessionId
         )
         
-        # Get active agent from database
-        session = get_session_by_id(sessionId, tenantId, userId)
-        if session:
-            active_agent = session.get("activeAgent", "orchestrator")
-            mapped_agent = agent_mapping.get(active_agent, active_agent.title())
-            # Update last message sender
-            if messages:
-                messages[-1].sender = mapped_agent
+        # Store messages SYNCHRONOUSLY before returning (not in background)
+        # This ensures they're in the database when we retrieve all messages
+        process_messages_background(messages, userId, tenantId, sessionId)
+
+        # Now retrieve ALL messages from the database (including the ones we just stored)
+        all_messages = get_session_messages(sessionId, tenantId, userId)
         
-        # Schedule background task to store messages
-        background_tasks.add_task(
-            process_messages_background, 
-            messages, userId, tenantId, sessionId
-        )
-        
-        return messages
-        
+        # Convert to MessageModel format for API response
+        return [
+            MessageModel(
+                id=msg.get("id", str(uuid.uuid4())),
+                type="message",
+                sessionId=sessionId,
+                tenantId=tenantId,
+                userId=userId,
+                timeStamp=msg.get("ts") or msg.get("timeStamp", datetime.utcnow().isoformat()),
+                sender=msg.get("sender", "Assistant"),
+                senderRole="User" if msg.get("role") == "user" else "Assistant",
+                text=msg.get("content", ""),
+                debugLogId=msg.get("debugLogId", ""),
+                tokensUsed=msg.get("tokensUsed", 0),
+                rating=msg.get("rating")
+            )
+            for msg in all_messages
+        ]
+
     except Exception as e:
         logger.error(f"Error in chat completion: {e}")
         import traceback
@@ -1264,7 +1305,7 @@ def search_places(search_request: PlaceSearchRequest):
         logger.info(f"🔍 search_places called with filters: type={place_type}, priceTier={price_tier}, dietary={dietary}, accessibility={accessibility}, tags={tags}")
         
         # Query places with all filters
-        places = query_places(
+        places = query_places_hybrid(
             vectors=vectors,
             geo_scope_id=search_request.geoScope.lower(),
             place_type=place_type,
@@ -1284,15 +1325,16 @@ def search_places(search_request: PlaceSearchRequest):
     "/tenant/{tenantId}/places/filter",
     tags=[PLACES_TAG],
     summary="Filter Places by City and Criteria",
-    description="Filter places by city, type, price tier, etc. Returns places without requiring embeddings.",
+    description="Filter places with optional theme for semantic search. Routes to vector search if theme provided, otherwise simple filter.",
     response_model=List[Place]
 )
 def filter_places(tenantId: str, filter_request: PlaceFilterRequest):
     """
-    Filter places by various criteria.
+    Filter places by various criteria with optional theme-based semantic search.
     
-    This endpoint returns places from a specific city filtered by type, price tier, 
-    dietary options, and accessibility features.
+    Two scenarios:
+    1. WITH THEME: Uses vector search with theme embedding and keyword extraction
+    2. WITHOUT THEME: Uses simple filtered query sorted by rating
     
     Args:
         tenantId: Tenant identifier
@@ -1302,60 +1344,46 @@ def filter_places(tenantId: str, filter_request: PlaceFilterRequest):
         List of Place objects matching the filter criteria
     """
     try:
-        logger.info(f"Filtering places for city: {filter_request.city}")
-        logger.info(f"Filter criteria: types={filter_request.types}, priceTiers={filter_request.priceTiers}")
+        logger.info(f"Filtering places for city: {filter_request.city}, theme: {filter_request.theme}")
+        logger.info(f"Filters: types={filter_request.types}, priceTiers={filter_request.priceTiers}, dietary={filter_request.dietary}, accessibility={filter_request.accessibility}")
 
-        # Build query
-        query = "SELECT * FROM c WHERE c.geoScopeId = @city"
-        parameters = [{"name": "@city", "value": filter_request.city.lower()}]
-        
-        # Add type filter
-        if filter_request.types and len(filter_request.types) > 0:
-            placeholders = ", ".join([f"@type{i}" for i in range(len(filter_request.types))])
-            query += f" AND c.type IN ({placeholders})"
-            for i, place_type in enumerate(filter_request.types):
-                parameters.append({"name": f"@type{i}", "value": place_type})
-        
-        # Add price tier filter
-        if filter_request.priceTiers and len(filter_request.priceTiers) > 0:
-            placeholders = ", ".join([f"@tier{i}" for i in range(len(filter_request.priceTiers))])
-            query += f" AND c.priceTier IN ({placeholders})"
-            for i, tier in enumerate(filter_request.priceTiers):
-                parameters.append({"name": f"@tier{i}", "value": tier})
+        # Determine which method to use based on theme
+        if filter_request.theme and filter_request.theme.strip():
+            logger.info("📊 Using THEME Hybrid SEARCH")
+            
+            # Convert multi-select filters to appropriate format
+            place_type = filter_request.types[0] if filter_request.types and len(filter_request.types) == 1 else None
 
-        # Add dietary options filter
-        if filter_request.dietary and len(filter_request.dietary) > 0:
-            # Use ARRAY_CONTAINS for each dietary option (AND logic - place must have ALL selected options)
-            dietary_conditions = []
-            for i, diet in enumerate(filter_request.dietary):
-                dietary_conditions.append(f"ARRAY_CONTAINS(c.dietary, @dietary{i})")
-                parameters.append({"name": f"@dietary{i}", "value": diet})
-            query += f" AND ({' AND '.join(dietary_conditions)})"
-
-        # Add accessibility features filter
-        if filter_request.accessibility and len(filter_request.accessibility) > 0:
-            # Use ARRAY_CONTAINS for each accessibility feature (AND logic - place must have ALL selected features)
-            accessibility_conditions = []
-            for i, feature in enumerate(filter_request.accessibility):
-                accessibility_conditions.append(f"ARRAY_CONTAINS(c.accessibility, @accessibility{i})")
-                parameters.append({"name": f"@accessibility{i}", "value": feature})
-            query += f" AND ({' AND '.join(accessibility_conditions)})"
-        
-        logger.info(f"Executing query: {query}")
-        logger.info(f"Parameters: {parameters}")
-        
-        # Execute query
-        places = list(places_container.query_items(
-            query=query,
-            parameters=parameters,
-            enable_cross_partition_query=True
-        ))
+            places = query_places_with_theme(
+                theme=filter_request.theme,
+                geo_scope_id=filter_request.city,
+                place_type=place_type,
+                dietary=filter_request.dietary,
+                accessibility=filter_request.accessibility,
+                price_tier=filter_request.priceTiers
+            )
+        else:
+            # SCENARIO 3: Explore without theme - use simple filter
+            logger.info("📊 Using SIMPLE FILTERED SEARCH")
+            
+            # Convert multi-select filters to appropriate format
+            place_type = filter_request.types[0] if filter_request.types and len(filter_request.types) == 1 else None
+            
+            places = query_places_filtered(
+                geo_scope_id=filter_request.city,
+                place_type=place_type,
+                dietary=filter_request.dietary,
+                accessibility=filter_request.accessibility,
+                price_tier=filter_request.priceTiers
+            )
         
         logger.info(f"✅ Found {len(places)} places matching filters")
         
         return [Place(**place) for place in places]
     except Exception as e:
         logger.error(f"Error filtering places: {e}")
+        import traceback
+        logger.error(f"{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Place filter failed: {str(e)}")
 
 

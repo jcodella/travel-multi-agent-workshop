@@ -73,7 +73,7 @@ hooks:
 
         echo ""
         echo "═══════════════════════════════════════════════════════════════"
-        echo "🐍 Setting up Python environment..."
+        echo "📦 Setting up Python virtual environment..."
         echo "═══════════════════════════════════════════════════════════════"
         echo ""
 
@@ -84,11 +84,11 @@ hooks:
         fi
 
         # Activate virtual environment
-        echo "Activating Python virtual environment..."
+        echo "Activating virtual environment..."
         . venv/bin/activate
 
         # Install requirements
-        echo "Installing Python dependencies..."
+        echo "Installing Python dependencies from requirements.txt..."
         if [ -f "requirements.txt" ]; then
             python -m pip install --upgrade pip setuptools wheel
             python -m pip install --prefer-binary -r requirements.txt
@@ -100,19 +100,17 @@ hooks:
 
         echo ""
         echo "═══════════════════════════════════════════════════════════════"
-        echo "� Data Loading Started"
+        echo "� Loading data into Cosmos DB..."
         echo "═══════════════════════════════════════════════════════════════"
         echo ""
 
         cd python
-
         # Load data into Cosmos DB (from python directory)
         python data/seed_data.py
-
         cd ..
 
         echo ""
-        echo "✅ Data loading complete!"
+        echo "✅ Setup complete!"
         echo ""
         echo "═══════════════════════════════════════════════════════════════"
 
@@ -132,9 +130,9 @@ hooks:
         MCP_AUTH_SECRET_KEY=""travel-mcp-server-jwt-secret-for-local-development""
         MCP_AUTH_TOKEN=""travel-server-dev-token-2024""
         MCP_SERVER_BASE_URL=""http://localhost:8080""
-        " > .\python\.env
+        " > ./python/.env
 
-        Write-Host "✅ Environment file created at .\python\.env"
+        Write-Host "✅ Environment file created at ./python/.env"
 
         # Create environment file for MCP server
         echo "
@@ -148,12 +146,12 @@ hooks:
         MCP_AUTH_SECRET_KEY=""travel-mcp-server-jwt-secret-for-local-development""
         MCP_AUTH_TOKEN=""travel-server-dev-token-2024""
         MCP_SERVER_BASE_URL=""http://localhost:8080""
-        " > .\mcp_server\.env
+        " > ./mcp_server/.env
 
-        Write-Host "✅ Environment file created at .\mcp_server\.env"
+        Write-Host "✅ Environment file created at ./mcp_server/.env"
         Write-Host ""
         Write-Host "═══════════════════════════════════════════════════════════════"
-        Write-Host "🐍 Setting up Python environment..."
+        Write-Host "📦 Setting up Python virtual environment..."
         Write-Host "═══════════════════════════════════════════════════════════════"
         Write-Host ""
 
@@ -164,11 +162,11 @@ hooks:
         }
 
         # Activate virtual environment
-        Write-Host "Activating Python virtual environment..."
+        Write-Host "Activating virtual environment..."
         & ".\venv\Scripts\Activate.ps1"
 
         # Install requirements
-        Write-Host "Installing Python dependencies..."
+        Write-Host "Installing Python dependencies from requirements.txt..."
         if (Test-Path "requirements.txt") {
             python -m pip install --upgrade pip setuptools wheel
             python -m pip install --prefer-binary -r requirements.txt
@@ -180,17 +178,16 @@ hooks:
 
         Write-Host ""
         Write-Host "═══════════════════════════════════════════════════════════════"
-        Write-Host " Data Loading Started"
+        Write-Host "� Loading data into Cosmos DB..."
         Write-Host "═══════════════════════════════════════════════════════════════"
         Write-Host ""
 
         Set-Location python
         # Load data into Cosmos DB (from python directory)
         python data\seed_data.py
-
         Set-Location ..
 
         Write-Host ""
-        Write-Host "✅ Data loading complete!"
+        Write-Host "✅ Setup complete!"
         Write-Host ""
         Write-Host "═══════════════════════════════════════════════════════════════"

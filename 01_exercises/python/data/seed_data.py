@@ -119,7 +119,7 @@ def upsert_item_with_retry(container, item):
     @retry_with_backoff
     def _upsert():
         return container.upsert_item(item)
-    
+
     return _upsert()
 
 
@@ -130,10 +130,10 @@ def upsert_item_with_retry(container, item):
 def get_openai_client() -> AzureOpenAI:
     """Initialize Azure OpenAI client with Azure AD authentication"""
     credential = DefaultAzureCredential()
-    
+
     def token_provider():
         return credential.get_token("https://cognitiveservices.azure.com/.default").token
-    
+
     return AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         azure_ad_token_provider=token_provider,
@@ -173,50 +173,50 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
 def generate_embeddings_concurrent(items: List[Dict[str, Any]], text_field: str) -> List[Dict[str, Any]]:
     """Generate embeddings for multiple items concurrently using batch processing"""
     print(f"   🔄 Generating embeddings for {len(items)} items using batch processing...")
-    
+
     # Filter items that need embeddings
     items_needing_embeddings = [
         (idx, item) for idx, item in enumerate(items)
         if not item.get("embedding") or item["embedding"] == []
     ]
-    
+
     if not items_needing_embeddings:
         print(f"   ✅ All items already have embeddings")
         return items
-    
+
     print(f"   📊 {len(items_needing_embeddings)} items need embeddings")
-    
+
     # Process in batches
     with concurrent.futures.ThreadPoolExecutor(max_workers=EMBEDDING_BATCH_SIZE) as executor:
         futures = []
-        
+
         # Split into batches
         for i in range(0, len(items_needing_embeddings), BATCH_SIZE):
             batch = items_needing_embeddings[i:i + BATCH_SIZE]
             batch_texts = [item[1][text_field] for item in batch]
-            
+
             future = executor.submit(generate_embeddings_batch, batch_texts)
             futures.append((future, batch))
-            
+
             # Add small delay to avoid rate limiting
             if i > 0:
                 time.sleep(RATE_LIMIT_DELAY)
-        
+
         # Collect results
         completed_count = 0
         for future, batch in futures:
             try:
                 embeddings = future.result(timeout=60)  # 60 second timeout
-                
+
                 # Apply embeddings to items
                 for (idx, item), embedding in zip(batch, embeddings):
                     items[idx]["embedding"] = embedding
                     completed_count += 1
-                
+
                 # Progress update
                 if completed_count % 50 == 0 or completed_count == len(items_needing_embeddings):
                     print(f"      Progress: {completed_count}/{len(items_needing_embeddings)} embeddings generated")
-                    
+
             except Exception as e:
                 print(f"   ❌ Batch embedding failed: {e}")
                 # Fallback to individual processing for this batch
@@ -226,7 +226,7 @@ def generate_embeddings_concurrent(items: List[Dict[str, Any]], text_field: str)
                         completed_count += 1
                     except Exception as e2:
                         print(f"   ❌ Individual embedding failed for item {idx}: {e2}")
-    
+
     print(f"   ✅ Generated {completed_count} embeddings")
     return items
 
@@ -240,7 +240,7 @@ def upload_items_batch(container, items_batch: List[Dict[str, Any]]) -> tuple:
     success_count = 0
     error_count = 0
     errors = []
-    
+
     for item in items_batch:
         try:
             upsert_item_with_retry(container, item)
@@ -254,7 +254,7 @@ def upload_items_batch(container, items_batch: List[Dict[str, Any]]) -> tuple:
         except Exception as e:
             error_count += 1
             errors.append(f"Item {item.get('id', 'unknown')}: {str(e)}")
-    
+
     return success_count, error_count, errors
 
 
@@ -263,16 +263,16 @@ def upload_items_concurrent(container, items: List[Dict[str, Any]], item_type: s
     if not items:
         print(f"   ⚠️  No {item_type} to upload")
         return
-    
+
     print(f"   🚀 Uploading {len(items)} {item_type} using concurrent processing...")
-    
+
     # Split into batches
     batches = [items[i:i + BATCH_SIZE] for i in range(0, len(items), BATCH_SIZE)]
-    
+
     total_success = 0
     total_errors = 0
     all_errors = []
-    
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         # Submit all batches with small delays to avoid overwhelming serverless
         future_to_batch = {}
@@ -282,7 +282,7 @@ def upload_items_concurrent(container, items: List[Dict[str, Any]], item_type: s
                 time.sleep(RATE_LIMIT_DELAY * 2)  # Increased delay for serverless
             future = executor.submit(upload_items_batch, container, batch)
             future_to_batch[future] = batch
-        
+
         # Collect results
         for future in concurrent.futures.as_completed(future_to_batch):
             try:
@@ -290,16 +290,16 @@ def upload_items_concurrent(container, items: List[Dict[str, Any]], item_type: s
                 total_success += success_count
                 total_errors += error_count
                 all_errors.extend(errors)
-                
+
                 # Progress update
                 if total_success % 100 == 0:
                     print(f"      Progress: {total_success}/{len(items)} {item_type} uploaded")
-                    
+
             except Exception as e:
                 batch = future_to_batch[future]
                 total_errors += len(batch)
                 all_errors.append(f"Batch upload failed: {str(e)}")
-    
+
     # Final summary
     print(f"   ✅ Upload complete: {total_success}/{len(items)} {item_type} uploaded successfully")
     if total_errors > 0:
@@ -566,7 +566,7 @@ def load_json_file(filename: str) -> List[Dict[str, Any]]:
         return []
 
 
-def seed_users(container, dry_run: bool = False):
+def seed_users(container):
     """Load users from users.json"""
     print("\n👤 Seeding USERS...")
 
@@ -576,17 +576,13 @@ def seed_users(container, dry_run: bool = False):
         print("   ⚠️  No users to seed")
         return
 
-    if dry_run:
-        print(f"   🔍 DRY RUN: Would seed {len(users)} users")
-        return
-
-    # Upload users concurrently (though users are typically few in number)
+    # Upload users concurrently (though users are typically few)
     upload_items_concurrent(container, users, "users")
 
     print(f"   ✅ Seeded {len(users)} users")
 
 
-def seed_memories(container, dry_run: bool = False):
+def seed_memories(container):
     """Load memories from memories.json and generate embeddings concurrently"""
     print("\n🧠 Seeding MEMORIES...")
 
@@ -596,20 +592,8 @@ def seed_memories(container, dry_run: bool = False):
         print("   ⚠️  No memories to seed")
         return
 
-    if dry_run:
-        print(f"   🔍 DRY RUN: Would seed {len(memories)} memories")
-        return
-
-    # Process TTL settings
-    for memory in memories:
-        # Handle TTL: -1 means no expiration (remove ttl field), otherwise keep the value
-        if memory.get("ttl") == -1:
-            # Remove ttl field for permanent memories (declarative, procedural)
-            memory.pop("ttl", None)
-        # If ttl is a positive number (e.g., 7776000 for 90 days), keep it as is
-
-    # Generate embeddings concurrently
-    memories = generate_embeddings_concurrent(memories, "text")
+    # # Generate embeddings concurrently
+    # memories = generate_embeddings_concurrent(memories, "text")
 
     # Upload data concurrently
     upload_items_concurrent(container, memories, "memories")
@@ -617,50 +601,50 @@ def seed_memories(container, dry_run: bool = False):
     print(f"   ✅ Seeded {len(memories)} memories with embeddings")
 
 
-def seed_places(container, dry_run: bool = False):
+def seed_places(container):
     """Load places from three separate JSON files and generate embeddings concurrently"""
     print("\n🏨 Seeding PLACES...")
-    
+
     # Load all three files
     print("   📂 Loading data files...")
     hotels = load_json_file("hotels_all_cities.json")
     restaurants = load_json_file("restaurants_all_cities.json")
     activities = load_json_file("activities_all_cities.json")
-    
+
     # Combine all places
     all_places = hotels + restaurants + activities
-    
+
     if not all_places:
         print("   ⚠️  No places to seed")
         return
-    
+
     # Display statistics
     print(f"\n   📊 Data loaded:")
     print(f"      • Hotels: {len(hotels)} (49 cities × 10 hotels = 490 expected)")
     print(f"      • Restaurants: {len(restaurants)} (49 cities × 20 restaurants = 980 expected)")
     print(f"      • Activities: {len(activities)} (49 cities × 30 activities = 1,470 expected)")
     print(f"      • Total places: {len(all_places)}")
-    
+
     # Count by type for verification
     type_counts = {}
     for place in all_places:
         place_type = place.get("type", "unknown")
         type_counts[place_type] = type_counts.get(place_type, 0) + 1
-    
+
     print(f"\n   📋 Breakdown by type:")
     for place_type, count in sorted(type_counts.items()):
         print(f"      • {place_type}: {count}")
-    
+
     # print(f"\n   � Processing {len(all_places)} places with concurrent embedding generation...")
     # print("      💡 Using batch processing and concurrent uploads for optimal performance")
     #
     # # Generate embeddings concurrently using batch processing
     # start_time = time.time()
     # all_places = generate_embeddings_concurrent(all_places, "description")
-    
+
     # Upload data concurrently
     upload_items_concurrent(container, all_places, "places")
-    
+
     # Final summary
     print(f"\n   ✅ Seeding complete")
     print(f"      • Hotels: {len(hotels)}")
@@ -669,7 +653,7 @@ def seed_places(container, dry_run: bool = False):
     print(f"      • Total: {len(all_places)} places")
 
 
-def seed_trips(container, dry_run: bool = False):
+def seed_trips(container):
     """Load trips from trips.json"""
     print("\n✈️  Seeding TRIPS...")
 
@@ -679,17 +663,13 @@ def seed_trips(container, dry_run: bool = False):
         print("   ⚠️  No trips to seed")
         return
 
-    if dry_run:
-        print(f"   🔍 DRY RUN: Would seed {len(trips)} trips")
-        return
-
     # Upload trips concurrently
     upload_items_concurrent(container, trips, "trips")
 
     print(f"   ✅ Seeded {len(trips)} trips")
 
 
-def seed_all_data(containers: Dict[str, Any], dry_run: bool = False):
+def seed_all_data(containers: Dict[str, Any]):
     """Seed all data from JSON files with concurrent processing"""
     print("\n" + "=" * 70)
     print("📝 DATA SEEDING (CONCURRENT MODE)")

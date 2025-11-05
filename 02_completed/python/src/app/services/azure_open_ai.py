@@ -92,7 +92,7 @@ def extract_keywords(text: str, max_keywords: int = 5) -> List[str]:
     """
     try:
         prompt = f"""Extract {max_keywords} key phrases or topics from this text.
-Return only the keywords as a comma-separated list, nothing else.
+Return only the keywords as a space-seprated list, nothing else.
 
 Text: {text}
 
