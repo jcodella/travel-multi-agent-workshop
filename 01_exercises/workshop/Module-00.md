@@ -196,7 +196,7 @@ Open a new PowerShell window/tab (keep the API server running in the first termi
 ### Step 2: Navigate to the Frontend Directory
 
 ```powershell
-cd \multi-agent-workshop\01_exercises\frontend
+cd 01_exercises\frontend
 ```
 
 ### Step 3: Install Node Dependencies

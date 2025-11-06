@@ -86,7 +86,7 @@ We also need to add calling functions for the two new agents.
 First we will add the necessary imports required. Find this import `from langchain_core.messages import AIMessage` and update it with the code below.
 
 ```python
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from datetime import datetime, UTC
 ```
 
@@ -262,7 +262,55 @@ builder.add_node("dining", call_dining_agent)
 
 Next, we need to add conditional edges between nodes to enable dynamic agent routing based on tool responses.
 
-Under the above code in the `def build_agent_graph` method, add the code below. (Note: The `get_active_agent` function referenced here will be defined next.)
+Above the `def build_agent_graph` function, add the below funcion:
+
+```python
+def get_active_agent(state: MessagesState, config) -> str:
+    """
+    Extract active agent from ToolMessage or fallback to Cosmos DB.
+    This is used by the router to determine which specialized agent to call.
+    Also checks if auto-summarization should be triggered.
+    """
+    thread_id = config["configurable"].get("thread_id", "UNKNOWN_THREAD_ID")
+    user_id = config["configurable"].get("userId", "UNKNOWN_USER_ID")
+    tenant_id = config["configurable"].get("tenantId", "UNKNOWN_TENANT_ID")
+
+    activeAgent = None
+
+    # Search for last ToolMessage and try to extract `goto`
+    for message in reversed(state['messages']):
+        if isinstance(message, ToolMessage):
+            try:
+                content_json = json.loads(message.content)
+                activeAgent = content_json.get("goto")
+                if activeAgent:
+                    logger.info(f"🎯 Extracted activeAgent from ToolMessage: {activeAgent}")
+                    break
+            except Exception as e:
+                logger.debug(f"Failed to parse ToolMessage content: {e}")
+
+    # Fallback: Cosmos DB lookup if needed
+    if not activeAgent:
+        try:
+            session_doc = sessions_container.read_item(
+                item=thread_id,
+                partition_key=[tenant_id, user_id, thread_id]
+            )
+            activeAgent = session_doc.get('activeAgent', 'unknown')
+            logger.info(f"Active agent from DB: {activeAgent}")
+        except Exception as e:
+            logger.error(f"Error retrieving active agent from DB: {e}")
+            activeAgent = "unknown"
+
+    # If activeAgent is unknown or None, default to orchestrator
+    if activeAgent in [None, "unknown"]:
+        logger.info(f"🔀 activeAgent is '{activeAgent}', defaulting to Orchestrator")
+        activeAgent = "orchestrator"
+
+    return activeAgent
+```
+
+Then, within the `def build_agent_graph` function, after the line `builder.add_edge(START, "orchestrator")` , add the following code:
 
 ```python
 # Orchestrator routing - can route to any specialized agent
@@ -274,7 +322,6 @@ Under the above code in the `def build_agent_graph` method, add the code below. 
             "activity": "activity",
             "dining": "dining",
             "itinerary_generator": "itinerary_generator",
-            "summarizer": "summarizer",
             "human": "human",  # Wait for user input
             "orchestrator": "orchestrator",  # fallback
         }
@@ -323,49 +370,6 @@ Under the above code in the `def build_agent_graph` method, add the code below. 
         }
     )
 
-def get_active_agent(state: MessagesState, config) -> str:
-    """
-    Extract active agent from ToolMessage or fallback to Cosmos DB.
-    This is used by the router to determine which specialized agent to call.
-    Also checks if auto-summarization should be triggered.
-    """
-    thread_id = config["configurable"].get("thread_id", "UNKNOWN_THREAD_ID")
-    user_id = config["configurable"].get("userId", "UNKNOWN_USER_ID")
-    tenant_id = config["configurable"].get("tenantId", "UNKNOWN_TENANT_ID")
-
-    activeAgent = None
-
-    # Search for last ToolMessage and try to extract `goto`
-    for message in reversed(state['messages']):
-        if isinstance(message, ToolMessage):
-            try:
-                content_json = json.loads(message.content)
-                activeAgent = content_json.get("goto")
-                if activeAgent:
-                    logger.info(f"🎯 Extracted activeAgent from ToolMessage: {activeAgent}")
-                    break
-            except Exception as e:
-                logger.debug(f"Failed to parse ToolMessage content: {e}")
-
-    # Fallback: Cosmos DB lookup if needed
-    if not activeAgent:
-        try:
-            session_doc = sessions_container.read_item(
-                item=thread_id,
-                partition_key=[tenant_id, user_id, thread_id]
-            )
-            activeAgent = session_doc.get('activeAgent', 'unknown')
-            logger.info(f"Active agent from DB: {activeAgent}")
-        except Exception as e:
-            logger.error(f"Error retrieving active agent from DB: {e}")
-            activeAgent = "unknown"
-
-    # If activeAgent is unknown or None, default to orchestrator
-    if activeAgent in [None, "unknown"]:
-        logger.info(f"🔀 activeAgent is '{activeAgent}', defaulting to Orchestrator")
-        activeAgent = "orchestrator"
-
-    return activeAgent
 ```
 
 ## Activity 2: Adding Agent MCP Tools
