@@ -29,7 +29,11 @@ Welcome to the Travel Assistant Multi-Agent Workshop! In this module, you'll set
 
 ### Step 1: Navigate to the Workshop Directory
 
-Open PowerShell and navigate to the workshop `\multi-agent-workshop\01_exercises` directory.
+Open PowerShell and navigate to the workshop `\multi-agent-workshop\01_exercises` directory:
+
+```powershell
+cd multi-agent-workshop\01_exercises
+```
 
 ### Step 2: Activate the Virtual Environment
 
@@ -196,7 +200,7 @@ Open a new PowerShell window/tab (keep the API server running in the first termi
 ### Step 2: Navigate to the Frontend Directory
 
 ```powershell
-cd 01_exercises\frontend
+cd multi-agent-workshop\01_exercises\frontend
 ```
 
 ### Step 3: Install Node Dependencies
