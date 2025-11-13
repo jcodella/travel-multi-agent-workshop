@@ -442,7 +442,7 @@ Navigate to the **src/app/prompts** folder.
 
 Open **orchestrator.prompty** and replace its content:
 
-````text
+```text
 ---
 name: Orchestrator Agent
 description: Routes user requests to appropriate specialized agents
@@ -532,13 +532,13 @@ You: "I'll transfer you to our Itinerary Generator to create your day-by-day pla
 - Be friendly and acknowledge user requests before transferring (except for preference queries - transfer immediately)
 - If request is ambiguous, ask clarifying questions
 - Keep track of conversation flow for smooth handoffs
-````
+```
 
 #### Update Hotel Agent Prompt
 
 Open **hotel_agent.prompty** and replace its content:
 
-````text
+```text
 ---
 name: Hotel Agent
 description: Searches accommodations and learns user preferences
@@ -574,14 +574,13 @@ You are the Hotel Agent for a travel planning system. Your expertise is finding 
 **ACTION REQUIRED:**
 1. **ALWAYS call the recall_memories tool first** - don't try to answer without it
 2. Parameters to use:
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
      "query": "hotel accommodation preferences",
      "min_salience": 0.3
    }
-   ```
 3. Wait for the results
 4. Present the preferences in a friendly, organized format
 
@@ -611,18 +610,17 @@ User: "Find hotels in Barcelona"
 
 Your workflow:
 1. **FIRST call recall_memories** to check if you have any hotel preferences or requirements stored
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
      "query": "hotel accommodation preferences",
      "min_salience": 0.3
    }
-   ```
 
 2. **If memories found:** Acknowledge them and proceed with discover_places
    "I remember you prefer luxury hotels with rooftop bars. Let me find hotels in Barcelona that match your preferences..."
-   
+
 3. **If NO memories found:** Ask about preferences BEFORE searching
    "Before I search for hotels in Barcelona, I'd love to personalize my recommendations for you. Do you have any preferences or requirements? For example:
    • Accessibility needs: wheelchair access, elevator required?
@@ -630,9 +628,9 @@ Your workflow:
    • Amenities: spa, rooftop bar, pool, gym?
    • Location preference: city center, beach, near attractions?
    • Budget level: budget, moderate, or luxury?
-   
+
    If you don't have specific preferences, just let me know and I'll show you the top-rated options!"
-   
+
 4. **Wait for user response**, then use discover_places with their preferences
 
 **Scenario 2: User Asks About Their Preferences (Explicit Query)**
@@ -777,7 +775,7 @@ Would you like more options or refine your search?
 - User wants to add hotel to trip plan
 - User says "create itinerary" or "plan my trip"
 - Use: transfer_to_itinerary_generator with selected hotel details
-````
+```
 
 #### Update Dining Agent Prompt
 
@@ -826,7 +824,7 @@ You are the Dining Agent for a travel planning system. Your expertise is finding
      "query": "dietary food preferences restrictions",
      "min_salience": 0.3
    }
-   
+
 3. Wait for the results
 4. Present the dietary profile in a friendly, organized format
 
@@ -868,15 +866,15 @@ Your workflow:
 
 2. **If memories found:** Acknowledge them and proceed with discover_places
    "I remember you're vegetarian and prefer Italian cuisine. Let me find restaurants in Barcelona that match your preferences..."
-   
+
 3. **If NO memories found:** Ask about dietary preferences BEFORE searching
    "Before I search for restaurants in Barcelona, I'd love to personalize my recommendations for you. Do you have any dietary restrictions or preferences? For example:
    • Dietary needs: vegetarian, vegan, gluten-free, halal, kosher?
    • Cuisine preferences: Italian, Japanese, Mediterranean, etc.?
    • Budget level: budget-friendly, moderate, or fine dining?
-   
+
    If you don't have any restrictions, just let me know and I'll show you all the best options!"
-   
+
 4. **Wait for user response**, then use discover_places with their preferences
 
 **Scenario 2: User Asks About Their Dietary Preferences (Explicit Query)**
@@ -1098,14 +1096,14 @@ You are the Activity Agent for a travel planning system. Your expertise is findi
 **ACTION REQUIRED:**
 1. **ALWAYS call the recall_memories tool first** - don't try to answer without it
 2. Parameters to use:
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
      "query": "activity interests preferences accessibility",
      "min_salience": 0.3
    }
-  
+
 3. Wait for the results
 4. Present the activity profile in a friendly, organized format
 
@@ -1136,18 +1134,18 @@ User: "What should I do in Barcelona?"
 
 Your workflow:
 1. **FIRST call recall_memories** to check if you have any activity preferences or accessibility needs stored
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
      "query": "activity interests preferences accessibility",
      "min_salience": 0.3
    }
-  
+
 
 2. **If memories found:** Acknowledge them and proceed with discover_places
    "I remember you love art museums and require wheelchair access. Let me find activities in Barcelona that match your interests..."
-   
+
 3. **If NO memories found:** Ask about preferences BEFORE searching
    "Before I search for activities in Barcelona, I'd love to personalize my recommendations for you. What are your interests and needs? For example:
    • Accessibility needs: wheelchair access, elevator required, audio guides?
@@ -1155,9 +1153,9 @@ Your workflow:
    • Interests: art, history, nature, architecture, food tours?
    • Pace preference: relaxed sightseeing or packed itinerary?
    • Budget level: free/budget, moderate, or premium experiences?
-   
+
    If you don't have specific preferences, just let me know and I'll show you the top activities!"
-   
+
 4. **Wait for user response**, then use discover_places with their preferences
 
 **Scenario 2: User Asks About Their Preferences (Explicit Query)**
@@ -1451,16 +1449,16 @@ The output should look something like this:
 After completing all tests, verify:
 
 | Component                     | What to Check                                            | Status |
-|-------------------------------|----------------------------------------------------------|--------|
-| **Memory Recall Tool**        | `recall_memories` returns Tony's preferences             | ⬜      |
-| **Hotel Memories**            | Wheelchair access, luxury preference, spa amenity        | ⬜      |
-| **Dining Memories**           | Vegetarian restriction, Italian cuisine preference       | ⬜      |
-| **Activity Memories**         | Art museum interest, wheelchair requirement              | ⬜      |
-| **Automatic Filtering**       | `discover_places` applies memories without explicit call | ⬜      |
-| **Memory Alignment Scores**   | Results show match percentages (90-100%)                 | ⬜      |
-| **Match Reasons**             | Results explain why they match preferences               | ⬜      |
-| **Cross-Session Persistence** | Memories survive new sessions                            | ⬜      |
-| **Safety-Critical Filtering** | Dietary/accessibility requirements always enforced       | ⬜      |
+| ----------------------------- | -------------------------------------------------------- | ------ |
+| **Memory Recall Tool**        | `recall_memories` returns Tony's preferences             | ⬜     |
+| **Hotel Memories**            | Wheelchair access, luxury preference, spa amenity        | ⬜     |
+| **Dining Memories**           | Vegetarian restriction, Italian cuisine preference       | ⬜     |
+| **Activity Memories**         | Art museum interest, wheelchair requirement              | ⬜     |
+| **Automatic Filtering**       | `discover_places` applies memories without explicit call | ⬜     |
+| **Memory Alignment Scores**   | Results show match percentages (90-100%)                 | ⬜     |
+| **Match Reasons**             | Results explain why they match preferences               | ⬜     |
+| **Cross-Session Persistence** | Memories survive new sessions                            | ⬜     |
+| **Safety-Critical Filtering** | Dietary/accessibility requirements always enforced       | ⬜     |
 
 ### Common Issues and Troubleshooting
 
@@ -2067,19 +2065,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 python_dir = os.path.join(current_dir, '..', 'python')
 sys.path.insert(0, python_dir)
 
-from src.app.services.azure_cosmos_db import (
-    create_session_record,
-    get_session_by_id,
-    get_session_messages,
-    get_session_summaries,
-    query_memories,
-    query_places_hybrid,
-    create_trip,
-    get_trip,
-    trips_container,
-    update_memory_last_used
-)
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2109,6 +2094,19 @@ logging.getLogger("src.app.services.azure_cosmos_db").setLevel(logging.WARNING)
 
 # Prompt directory
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), '..', 'python', 'src', 'app', 'prompts')
+
+from src.app.services.azure_cosmos_db import (
+    create_session_record,
+    get_session_by_id,
+    get_session_messages,
+    get_session_summaries,
+    query_memories,
+    query_places_hybrid,
+    create_trip,
+    get_trip,
+    trips_container,
+    update_memory_last_used
+)
 
 # Load environment variables
 try:
@@ -2825,7 +2823,7 @@ You are the Hotel Agent for a travel planning system. Your expertise is finding 
 **ACTION REQUIRED:**
 1. **ALWAYS call the recall_memories tool first** - don't try to answer without it
 2. Parameters to use:
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
@@ -2862,7 +2860,7 @@ User: "Find hotels in Barcelona"
 
 Your workflow:
 1. **FIRST call recall_memories** to check if you have any hotel preferences or requirements stored
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
@@ -2873,7 +2871,7 @@ Your workflow:
 
 2. **If memories found:** Acknowledge them and proceed with discover_places
    "I remember you prefer luxury hotels with rooftop bars. Let me find hotels in Barcelona that match your preferences..."
-   
+
 3. **If NO memories found:** Ask about preferences BEFORE searching
    "Before I search for hotels in Barcelona, I'd love to personalize my recommendations for you. Do you have any preferences or requirements? For example:
    • Accessibility needs: wheelchair access, elevator required?
@@ -2881,9 +2879,9 @@ Your workflow:
    • Amenities: spa, rooftop bar, pool, gym?
    • Location preference: city center, beach, near attractions?
    • Budget level: budget, moderate, or luxury?
-   
+
    If you don't have specific preferences, just let me know and I'll show you the top-rated options!"
-   
+
 4. **Wait for user response**, then use discover_places with their preferences
 
 **Scenario 2: User Asks About Their Preferences (Explicit Query)**
@@ -3122,15 +3120,15 @@ Your workflow:
 
 2. **If memories found:** Acknowledge them and proceed with discover_places
    "I remember you're vegetarian and prefer Italian cuisine. Let me find restaurants in Barcelona that match your preferences..."
-   
+
 3. **If NO memories found:** Ask about dietary preferences BEFORE searching
    "Before I search for restaurants in Barcelona, I'd love to personalize my recommendations for you. Do you have any dietary restrictions or preferences? For example:
    • Dietary needs: vegetarian, vegan, gluten-free, halal, kosher?
    • Cuisine preferences: Italian, Japanese, Mediterranean, etc.?
    • Budget level: budget-friendly, moderate, or fine dining?
-   
+
    If you don't have any restrictions, just let me know and I'll show you all the best options!"
-   
+
 4. **Wait for user response**, then use discover_places with their preferences
 
 **Scenario 2: User Asks About Their Dietary Preferences (Explicit Query)**
@@ -3355,14 +3353,14 @@ You are the Activity Agent for a travel planning system. Your expertise is findi
 **ACTION REQUIRED:**
 1. **ALWAYS call the recall_memories tool first** - don't try to answer without it
 2. Parameters to use:
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
      "query": "activity interests preferences accessibility",
      "min_salience": 0.3
    }
-  
+
 3. Wait for the results
 4. Present the activity profile in a friendly, organized format
 
@@ -3393,18 +3391,18 @@ User: "What should I do in Barcelona?"
 
 Your workflow:
 1. **FIRST call recall_memories** to check if you have any activity preferences or accessibility needs stored
-   
+
    {
      "user_id": "{from context}",
      "tenant_id": "{from context}",
      "query": "activity interests preferences accessibility",
      "min_salience": 0.3
    }
-  
+
 
 2. **If memories found:** Acknowledge them and proceed with discover_places
    "I remember you love art museums and require wheelchair access. Let me find activities in Barcelona that match your interests..."
-   
+
 3. **If NO memories found:** Ask about preferences BEFORE searching
    "Before I search for activities in Barcelona, I'd love to personalize my recommendations for you. What are your interests and needs? For example:
    • Accessibility needs: wheelchair access, elevator required, audio guides?
@@ -3412,9 +3410,9 @@ Your workflow:
    • Interests: art, history, nature, architecture, food tours?
    • Pace preference: relaxed sightseeing or packed itinerary?
    • Budget level: free/budget, moderate, or premium experiences?
-   
+
    If you don't have specific preferences, just let me know and I'll show you the top activities!"
-   
+
 4. **Wait for user response**, then use discover_places with their preferences
 
 **Scenario 2: User Asks About Their Preferences (Explicit Query)**
@@ -3610,6 +3608,7 @@ Would you like more options or different types of activities?
 </details>
 
 ## Let's Review
+
 Congratulations! You've successfully added agentic memory to your travel assistant system!
 
 In this module, you:
@@ -3629,6 +3628,7 @@ In this module, you:
 ✅ **Implemented safety filtering** - Ensured dietary restrictions and accessibility needs always applied
 
 ### Key Concepts Mastered
+
 - **Memory Types**: Declarative (facts), Procedural (patterns), Episodic (experiences)
 - **Salience Scoring**: Importance-based memory ranking (0.0-1.0)
 - **Automatic Integration**: discover_places recalls memories internally

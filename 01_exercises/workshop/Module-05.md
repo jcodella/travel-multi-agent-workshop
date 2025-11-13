@@ -119,17 +119,20 @@ In this activity, you'll create a LangSmith account, generate an API key, and co
 2. Click **Sign Up** and create your free LangSmith account
    - You can log in with Google, GitHub, or email
    - No credit card required for the free tier
-3. Once you're signed in, you'll see your workspace dashboard
+3. Once you're signed in, you'll see your workspace dashboard like below, in your case this will not show any projects.
+
+![Setup_1](./media/Module-05/Setup2.png)
 
 ### Step 2: Generate an API Key
 
-1. Click on your profile icon in the top right corner
-2. Navigate to **Settings**
-3. Select **API Keys** from the left sidebar
-4. Click **Create API Key**
-5. Give your key a name (e.g., "Travel Assistant Workshop")
-6. Copy the API key - it will start with **lsv2_pt_**
+1. Click on the settings icon in the bottom left corner
+2. Select **API Keys** from the left sidebar 
+3. Click **Create API Key**
+4. Give your key a name (e.g., "Travel Assistant Workshop")
+5. Copy the API key - it will start with **lsv2_pt_**
    - **Important**: Save this key securely - you won't be able to see it again!
+
+![Setup_2](./media/Module-05/Setup1.png)
 
 ### Step 3: Add LangSmith Environment Variables
 
@@ -269,6 +272,13 @@ def transfer_to_activity(reason: str) -> str:
 @traceable
 def transfer_to_dining(reason: str) -> str:
     """Transfer conversation to the Dining Agent."""
+    # Existing code...
+
+@mcp.tool()
+@traceable
+def transfer_to_summarizer(reason: str) -> str:
+    """
+    Transfer conversation to the Summarizer agent.
     # Existing code...
 ```
 
@@ -759,43 +769,6 @@ Since we've added support for LangSmith, restart all services to load the change
 
 **Terminal 1 (MCP Server):**
 
-```shell
-cd mcp_server
-python -m mcp_http_server
-```
-
-**Terminal 2 (Backend API):**
-
-```shell
-cd multi-agent-workshop/01_exercises/python
-uvicorn src.app.travel_agents_api:app --reload --host 0.0.0.0 --port 8000
-```
-
-**Terminal 3 (Frontend):**
-
-```shell
-cd multi-agent-workshop/01_exercises/python
-npm start
-```
-
-### Step 2: Open LangSmith Dashboard
-
-1. Open your browser and go to [smith.langchain.com](https://smith.langchain.com/)
-2. Navigate to your project: **multi-agent-travel-app**
-3. You should see the **Traces** tab—this is where all your execution traces will appear
-
-**Note:** If you don't see your project, use the search bar and type "travel" to find it.
-
-TODO: Add image here
-
-### Step 3: Run Test Scenarios
-
-Now we'll run test scenarios to generate traces. Make sure all three services are running (MCP server, backend API, and frontend).
-
-If any service isn't running, start them as follows:
-
-**Terminal 1 (MCP Server):**
-
 **Linux/Mac/WSL/Codespaces:**
 
 ```bash
@@ -843,21 +816,52 @@ cd multi-agent-workshop/01_exercises/frontend
 npm start
 ```
 
-Once all services are running, open your browser to http://localhost:4200 and interact with the travel assistant to generate traces.
+### Step 2: Open LangSmith Dashboard
 
-#### Test Scenario 1: Memory Extraction Trace
+1. Open your browser and go to [smith.langchain.com](https://smith.langchain.com/)
+2. Navigate to your project: **multi-agent-travel-app**
+3. You should see the **Traces** tab—this is where all your execution traces will appear
 
-## TODO: Add example
+**Note:** If you don't see your project, use the search bar and type "travel" to find it.
+
+### Step 3: Run Test Scenarios
+
+Now we'll run test scenarios to generate traces. Make sure all three services are running (MCP server, backend API, and frontend).
+
+Open your browser to http://localhost:4200 and interact with the travel assistant to generate traces.
+
+#### Test 1
+
+- Start a new conversation in the frontend(you can choose any user)
+- Send: **Hi, I'm planning a trip to Seattle**
 
 **What to look for in LangSmith:**
 
-Navigate to your LangSmith dashboard and find the most recent trace. You can see in the trace that the app starts with the orchestrator agent, which extracts preferences from the user message. Clicking on the agent nodes and tool calls, you can check the complete stack trace of the memory extraction process.
+Navigate to your LangSmith dashboard and click on your project **travel-assistant**, and you will see the runs like the image below. Every message you send to the assistant will generate a run.
 
-## TODO: Add image here
+![Test1](./media/Module-05/Test5.png)
 
-You can click on the **extract_preferences_from_message** tool call as highlighted in the image to view the LLM's analysis and extracted preferences.
+Now click on the **Threads** tab right next to the **Runs**, where you will see the tracing for every session. Click on the session/thread shown there, and you would be able to see tracing for every turn like below.
 
-## TODO: Add image here
+![Test2](./media/Module-05/Test6.png)
+
+Now, let's copy the sessionId and navigate back to the **Runs** tab. Click on filter, add Thread Id filter like below and press enter. 
+
+![Test3](./media/Module-05/Test3.png)
+
+#### Test 2
+
+- Continue the previous conversation.
+- Send: **Find me some hotels.**
+
+You should see a new run/trace. You can see in the trace that the app starts with the orchestrator agent, which extracts preferences from the user message. Clicking on the agent nodes and tool calls, you can check the complete stack trace of the multi agent app.
+
+![Test4](./media/Module-05/Test4.png)
+
+#### Test 3
+
+- You can try sending more messages to the chat assistant, and keep exploring the traces.
+- The **Runs** tab show you details about every turn, and the **Threads** tab show the entire session having all the turns.
 
 ## Troubleshooting
 

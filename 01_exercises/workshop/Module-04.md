@@ -684,6 +684,42 @@ Auto-summarization solves these by compressing older messages into concise summa
 
 Navigate to the file **mcp_server/mcp_http_server**
 
+Locate **def transfer_to_dining** tool, and add the following **transfer_to** tool after it.
+
+```python
+@mcp.tool()
+def transfer_to_summarizer(
+        reason: str
+) -> str:
+    """
+    Transfer conversation to the Summarizer agent.
+
+    Use this when:
+    - User asks for a recap or summary of the conversation
+    - Conversation has become long (12+ turns)
+    - User wants to review what's been discussed or planned
+
+    Examples:
+    - "Summarize our conversation"
+    - "What have we planned so far?"
+    - "Give me a recap"
+
+    Args:
+        reason: Why you're transferring to this agent
+
+    Returns:
+        JSON with goto field for routing
+    """
+
+    logger.info(f"🔄 Transfer to Summarizer: {reason}")
+
+    return json.dumps({
+        "goto": "summarizer",
+        "reason": reason,
+        "message": "Transferring to Summarizer to compress and recap our conversation."
+    })
+```
+
 Locate **def store_resolved_preferences** tool, and add the following tools after it.
 
 ```python
@@ -3003,26 +3039,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 python_dir = os.path.join(current_dir, '..', 'python')
 sys.path.insert(0, python_dir)
 
-from src.app.services.azure_open_ai import get_openai_client
-from src.app.services.azure_cosmos_db import (
-    create_session_record,
-    create_summary,
-    get_all_user_memories,
-    get_message_by_id,
-    get_session_by_id,
-    get_session_messages,
-    get_session_summaries,
-    get_user_summaries,
-    query_memories,
-    query_places_hybrid,
-    create_trip,
-    get_trip,
-    store_memory,
-    supersede_memory,
-    trips_container,
-    update_memory_last_used
-)
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3052,6 +3068,26 @@ logging.getLogger("src.app.services.azure_cosmos_db").setLevel(logging.WARNING)
 
 # Prompt directory
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), '..', 'python', 'src', 'app', 'prompts')
+
+from src.app.services.azure_open_ai import get_openai_client
+from src.app.services.azure_cosmos_db import (
+    create_session_record,
+    create_summary,
+    get_all_user_memories,
+    get_message_by_id,
+    get_session_by_id,
+    get_session_messages,
+    get_session_summaries,
+    get_user_summaries,
+    query_memories,
+    query_places_hybrid,
+    create_trip,
+    get_trip,
+    store_memory,
+    supersede_memory,
+    trips_container,
+    update_memory_last_used
+)
 
 # Load environment variables
 try:
@@ -3257,6 +3293,37 @@ def transfer_to_dining(
     })
 
 
+@mcp.tool()
+def transfer_to_summarizer(
+        reason: str
+) -> str:
+    """
+    Transfer conversation to the Summarizer agent.
+
+    Use this when:
+    - User asks for a recap or summary of the conversation
+    - Conversation has become long (12+ turns)
+    - User wants to review what's been discussed or planned
+
+    Examples:
+    - "Summarize our conversation"
+    - "What have we planned so far?"
+    - "Give me a recap"
+
+    Args:
+        reason: Why you're transferring to this agent
+
+    Returns:
+        JSON with goto field for routing
+    """
+
+    logger.info(f"🔄 Transfer to Summarizer: {reason}")
+
+    return json.dumps({
+        "goto": "summarizer",
+        "reason": reason,
+        "message": "Transferring to Summarizer to compress and recap our conversation."
+    })
 # ============================================================================
 # 2. Place Discovery Tools
 # ============================================================================
